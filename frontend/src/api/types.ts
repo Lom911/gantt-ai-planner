@@ -223,7 +223,7 @@ export interface TaskHistoryEntry {
 // LLM is a real Anthropic key or the deterministic fake used when none is configured, so the UI
 // can show a "demo mode" hint instead of silently behaving as if the agent understands anything.
 export interface MetaResponse {
-  llm_mode: "anthropic" | "fake";
+  llm_mode: "anthropic" | "openrouter" | "fake";
   model: string | null;
 }
 

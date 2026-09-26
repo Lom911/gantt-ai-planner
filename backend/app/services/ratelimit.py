@@ -13,5 +13,6 @@ async def check_chat_limits(
     now = datetime.now(UTC)
     if await repo.count_user_messages_since(db, now - timedelta(hours=1), session_id) >= per_hour:
         raise RateLimited(f"Лимит: {per_hour} сообщений в час. Попробуйте позже.")
-    if await repo.count_user_messages_since(db, now - timedelta(days=1)) >= per_day:
+    # App-wide quota over the session-independent ledger (see ChatUsageRow).
+    if await repo.count_chat_usage_since(db, now - timedelta(days=1)) >= per_day:
         raise RateLimited("Дневной лимит демо исчерпан. Попробуйте завтра.")

@@ -1,3 +1,4 @@
+import time
 import zipfile
 from datetime import date, datetime
 from io import BytesIO
@@ -263,3 +264,42 @@ def test_dependency_count_is_capped_on_import():
     res = parse_plan_xlsx(xlsx(rows), MON)
     assert not res.ok
     assert any(f"Больше {MAX_DEPENDENCIES} связей" in e.message for e in res.errors)
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "1" + " " * 20_000 + "x",  # quadratic in the old _NUM_REF_RE (two adjacent \s*)
+        "a" + " " * 20_000 + "+" + " " * 20_000 + "x",  # quadratic in the old _NAME_LAG_RE
+    ],
+    ids=["number-ref", "name-with-lag"],
+)
+def test_pathological_predecessor_cell_is_rejected_fast(cell):
+    # Security audit H1: one such cell used to stall the single worker for seconds to hours.
+    rows = [HEADER, ["T1", "", None, 1, None], ["T2", "", None, 1, cell]]
+    t0 = time.perf_counter()
+    res = parse_plan_xlsx(xlsx(rows), MON)
+    assert time.perf_counter() - t0 < 1.0
+    assert not res.ok
+    assert any(
+        "Предшественники" in e.message or "слишком длин" in e.message.lower() for e in res.errors
+    )
+
+
+def test_linear_regexes_on_long_but_allowed_tokens():
+    # Even within the length caps the resolver must stay linear: a 220-char token of spaces.
+    from app.excel.parse import _resolve
+
+    t0 = time.perf_counter()
+    for token in ["1" + " " * 218 + "x", "a" + " " * 100 + "+" + " " * 100 + "x"]:
+        ref, _ = _resolve(token, True, {}, {}, {1})
+        assert isinstance(ref, str)
+    assert time.perf_counter() - t0 < 0.05
+
+
+def test_name_reference_with_lag_still_uses_the_last_plus():
+    rows = [HEADER, ["Сборка A+B", "", None, 2, None], ["Тест", "", None, 1, "Сборка A+B + 3д"]]
+    res = parse_plan_xlsx(xlsx(rows), MON)
+    assert res.ok, res.errors
+    dep = res.plan.dependencies[0]
+    assert (dep.predecessor_id, dep.successor_id, dep.lag) == (1, 2, 3)

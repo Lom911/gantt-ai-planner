@@ -161,3 +161,18 @@ async def test_bare_post_mcp_without_trailing_slash_returns_200_not_307(app, ses
         )
     assert r.status_code == 200
     assert r.json()["result"]["tools"]
+
+
+async def test_mcp_activity_keeps_the_session_alive(app, session_client):
+    # Security audit: a user working only through an MCP client must not lose the plan to the
+    # idle-session cleanup — using the token counts as activity on its session.
+    from sqlalchemy import text
+
+    token = await _issue_token(session_client)
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE sessions SET last_seen_at = now() - interval '13 days'"))
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    async with app.state.sessionmaker() as db:
+        age = (await db.execute(text("SELECT now() - last_seen_at FROM sessions"))).scalar_one()
+    assert age.total_seconds() < 60

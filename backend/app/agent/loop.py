@@ -15,6 +15,10 @@ from app.mcp_server.client import PlanToolClient
 from app.services.plan_service import PlanService, PlanState
 
 MUTATING_TOOLS = {"apply_operations", "undo"}
+# Every iteration re-sends the whole conversation, so both knobs bound the LLM cost of a turn
+# (security audit M1): a normal turn is find → apply → answer, and the full plan is already in
+# the system prompt, so a huge tool result (get_plan on 500 tasks) is cut instead of re-sent.
+MAX_TOOL_RESULT_CHARS = 20_000
 
 
 class TooManySteps(Exception):
@@ -30,7 +34,7 @@ class Agent:
         *,
         today: Callable[[], date],
         history_limit: int = 20,
-        max_iterations: int = 15,
+        max_iterations: int = 8,
         turn_timeout: float = 180.0,
     ) -> None:
         self._llm = llm
@@ -235,12 +239,23 @@ class Agent:
                     {
                         "type": "tool_result",
                         "tool_use_id": call.id,
-                        "content": r.text,
+                        "content": _cap(r.text),
                         "is_error": r.is_error,
                     }
                 )
             messages.append({"role": "user", "content": tool_results})
         raise TooManySteps()
+
+
+def _cap(text: str) -> str:
+    if len(text) <= MAX_TOOL_RESULT_CHARS:
+        return text
+    cut = len(text) - MAX_TOOL_RESULT_CHARS
+    return (
+        text[:MAX_TOOL_RESULT_CHARS]
+        + f"\n…[результат обрезан на {cut} символов: план целиком есть в системном промпте;"
+        " для деталей используй find_tasks или get_task]"
+    )
 
 
 def to_llm_messages(history: list[ChatMessageRow]) -> list[dict[str, Any]]:

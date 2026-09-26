@@ -132,6 +132,8 @@ def create_app(
         app.state.mcp = mcp
         app.state.session_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
         app.state.chat_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
+        app.state.mutation_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
+        app.state.import_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
         cleanup_task = asyncio.create_task(_cleanup_loop(app, cfg))
         try:
             async with PlanToolClient(mcp) as tool_client:
@@ -150,8 +152,8 @@ def create_app(
     app = FastAPI(
         title="Gantt AI Planner",
         lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
-        docs_url="/api/docs",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if cfg.api_docs else None,
+        openapi_url="/api/openapi.json" if cfg.api_docs else None,
         redoc_url=None,
     )
     app.add_middleware(AccessLogMiddleware)

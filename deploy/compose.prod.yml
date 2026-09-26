@@ -75,6 +75,15 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Same hardening as `app` (the image already runs as uid 10001): this container holds the
+    # owner (DDL) password, so it gets no more privileges than the app itself.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: "no"
     logging:
       driver: json-file
@@ -99,6 +108,8 @@ services:
       # scheme, the app for the per-IP limits (last X-Forwarded-For hop = real client).
       FORWARDED_ALLOW_IPS: "*"
       TRUST_PROXY: "true"
+      # No public Swagger/OpenAPI in production.
+      API_DOCS: "false"
     secrets:
       - anthropic_api_key
       - openrouter_api_key

@@ -102,9 +102,18 @@ step_compose_files() {
         echo "    $APP_DIR/.env already exists, leaving it untouched"
     fi
 
-    install -m 0644 -o root -g root "$SCRIPT_DIR/caddy/compose.yml" "$CADDY_DIR/compose.yml"
-    install -m 0644 -o root -g root "$SCRIPT_DIR/caddy/Caddyfile" "$CADDY_DIR/Caddyfile"
-    echo "    installed $APP_DIR/compose.prod.yml, $APP_DIR/initdb/10-roles.sh, $CADDY_DIR/compose.yml, $CADDY_DIR/Caddyfile"
+    echo "    installed $APP_DIR/compose.prod.yml, $APP_DIR/initdb/10-roles.sh"
+
+    # The Caddy stack may be shared with other sites on this host: never overwrite an existing
+    # Caddyfile/compose.yml (a re-run would silently drop the other sites) — only create them.
+    for file in compose.yml Caddyfile; do
+        if [ -f "$CADDY_DIR/$file" ]; then
+            echo "    $CADDY_DIR/$file already exists, leaving it untouched (merge deploy/caddy/$file by hand if needed)"
+        else
+            install -m 0644 -o root -g root "$SCRIPT_DIR/caddy/$file" "$CADDY_DIR/$file"
+            echo "    installed $CADDY_DIR/$file"
+        fi
+    done
 }
 
 step_secrets() {

@@ -36,6 +36,9 @@ class SessionTokenVerifier(TokenVerifier):
                 return None
             await repo.touch_mcp_token(db, row.id, now)
             session_id = row.session_id
+            # Working only through an MCP client is activity too: without this the idle-session
+            # cleanup (session_ttl_days) would delete the plan of an MCP-only user.
+            await repo.touch_session(db, session_id)
         return AccessToken(
             token=token,
             client_id=str(session_id),

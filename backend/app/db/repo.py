@@ -5,7 +5,7 @@ from typing import Any, NamedTuple
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ChatMessageRow, McpTokenRow, PlanVersionRow, SessionRow
+from app.db.models import ChatMessageRow, ChatUsageRow, McpTokenRow, PlanVersionRow, SessionRow
 
 
 class VersionMeta(NamedTuple):
@@ -168,6 +168,20 @@ async def recent_chat_messages(
         .limit(limit)
     )
     return list(reversed(rows.all()))
+
+
+async def add_chat_usage(db: AsyncSession) -> None:
+    db.add(ChatUsageRow())
+    await db.flush()
+
+
+async def count_chat_usage_since(db: AsyncSession, since: datetime) -> int:
+    stmt = select(func.count()).select_from(ChatUsageRow).where(ChatUsageRow.created_at >= since)
+    return int(await db.scalar(stmt) or 0)
+
+
+async def prune_chat_usage(db: AsyncSession, older_than: datetime) -> None:
+    await db.execute(delete(ChatUsageRow).where(ChatUsageRow.created_at < older_than))
 
 
 async def count_user_messages_since(

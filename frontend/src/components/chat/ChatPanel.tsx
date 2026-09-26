@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useChat } from "@/hooks/useChat";
+import { useMeta } from "@/hooks/useMeta";
+import { llmDisclaimer } from "./llmDisclaimer";
 import { MessageItem } from "./MessageItem";
 
 const EXAMPLE_PROMPTS = [
@@ -17,6 +19,7 @@ export function ChatPanel({
   agentBusy: boolean;
 }) {
   const { messages, streaming, send, error } = useChat();
+  const { data: meta } = useMeta();
   const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const disabled = streaming !== null || agentBusy;
@@ -88,9 +91,7 @@ export function ChatPanel({
           }}
         />
         <div className="mt-1 flex items-center justify-between gap-2">
-          <p className="text-[11px] text-muted-foreground">
-            План отправляется в LLM Anthropic. Не загружайте реальные персональные данные.
-          </p>
+          <p className="text-[11px] text-muted-foreground">{llmDisclaimer(meta?.llm_mode)}</p>
           <button
             type="button"
             className="shrink-0 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"

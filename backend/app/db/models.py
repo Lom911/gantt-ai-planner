@@ -49,6 +49,18 @@ class PlanVersionRow(Base):
     created_at: Mapped[datetime] = _created()
 
 
+class ChatUsageRow(Base):
+    """One row per accepted chat message, for the app-wide daily quota. Deliberately not tied
+    to a session (no FK): chat_messages rows are cascade-deleted with their session, so a
+    quota counted over them reset with «new session → chat → delete session». Rows older
+    than two days are pruned by the hourly cleanup."""
+
+    __tablename__ = "chat_usage"
+    __table_args__ = (Index("ix_chat_usage_created", "created_at"),)
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = _created()
+
+
 class ChatMessageRow(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (

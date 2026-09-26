@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # Per client IP (in-memory, sliding hour): new sessions and chat messages across sessions.
     session_limit_per_ip_hour: int = 20
     chat_limit_per_ip_hour: int = 60
+    # Per client IP: plan mutations (operations/undo/redo/reset) and Excel imports. Each one
+    # stores a full plan snapshot, so unbounded bursts from one client would grow the database.
+    mutation_limit_per_ip_hour: int = 1200
+    import_limit_per_ip_hour: int = 60
+    # Interactive API docs (/api/docs, /api/openapi.json): handy locally, off in production.
+    api_docs: bool = True
     # Take the client IP from the last X-Forwarded-For hop (the one our reverse proxy set).
     # Only turn on when every request reaches the app through that proxy (production: Caddy
     # on the internal network); otherwise any client could pick its own "IP".

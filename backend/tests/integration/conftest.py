@@ -39,7 +39,7 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 async def sessionmaker(engine: AsyncEngine) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     async with engine.begin() as conn:
         await conn.execute(
-            text("TRUNCATE sessions, plan_versions, chat_messages, mcp_tokens CASCADE")
+            text("TRUNCATE sessions, plan_versions, chat_messages, mcp_tokens, chat_usage CASCADE")
         )
     yield async_sessionmaker(engine, expire_on_commit=False)
 

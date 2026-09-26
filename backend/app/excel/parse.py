@@ -47,8 +47,15 @@ _BROKEN_FILE_ERRORS = (
 _DURATION_RE = re.compile(
     r"^(\d+(?:[.,]\d+)?)\s*(д|дн|дня|дней|день|d|day|days|н|нед|недел[яьи]|w|wk|week|weeks)?\.?$"
 )
-_NUM_REF_RE = re.compile(r"^(\d+)(?:[.,]0+)?\s*(?:fs|он)?\s*(?:\+\s*(\d+)\s*(?:д|дн|d)?\.?)?$")
-_NAME_LAG_RE = re.compile(r"^(.*?)\s*\+\s*(\d+)\s*(?:д|дн|d)?\.?$")
+# Linear on purpose (security audit H1): no two adjacent unbounded quantifiers over the same
+# characters — the old `\s*(?:fs|он)?\s*` and `(.*?)\s*\+` backtracked quadratically, and one
+# crafted cell stalled the only worker. Lengths are capped before these run anyway.
+_NUM_REF_RE = re.compile(r"^(\d+)(?:[.,]0+)?\s*(?:(?:fs|он)\s*)?(?:\+\s*(\d+)\s*(?:д|дн|d)?\.?)?$")
+_LAG_SUFFIX_RE = re.compile(r"^\s*(\d+)\s*(?:д|дн|d)?\.?$")
+# «Предшественники» is the one free-text column not covered by LIMITS: several name references
+# (a name is up to 200 chars) fit in 2000; one reference is a name plus «+N».
+MAX_PREDS_CHARS = 2000
+MAX_PRED_TOKEN_CHARS = 220
 _OTHER_TYPES_RE = re.compile(r"^\d+\s*(ss|ff|sf|нн|оо|но)\b")
 
 
@@ -296,7 +303,17 @@ def parse_plan_xlsx(data: bytes, project_start: date) -> ImportResult:
         row, succ = it["row"], ids.get(it["row"])
         if succ is None or not it["preds"]:
             continue
+        if len(it["preds"]) > MAX_PREDS_CHARS:
+            message = (
+                f"Слишком длинная ячейка «Предшественники» (больше {MAX_PREDS_CHARS} символов)"
+            )
+            errors.append(ImportIssue(row=row, message=message))
+            continue
         for token in (t.strip() for t in re.split(r"[;,\n]", it["preds"]) if t.strip()):
+            if len(token) > MAX_PRED_TOKEN_CHARS:
+                message = f"Слишком длинная ссылка в «Предшественники»: «{token[:40]}…»"
+                errors.append(ImportIssue(row=row, message=message))
+                continue
             ref, lag = _resolve(token, use_numbers, by_position, by_name, known_ids)
             if isinstance(ref, str):
                 errors.append(ImportIssue(row=row, message=ref))
@@ -370,9 +387,11 @@ def _resolve(
             return f"Предшественник «{token}» не найден", 0
         return ref, lag
     name, lag = token, 0
-    m = _NAME_LAG_RE.match(token)
+    # «Название + 3д»: the lag follows the last «+» (a name may contain «+» itself).
+    head, plus, tail = token.rpartition("+")
+    m = _LAG_SUFFIX_RE.match(tail) if plus else None
     if m:
-        name, lag = m.group(1), int(m.group(2))
+        name, lag = head, int(m.group(1))
     matches = by_name.get(name.strip().casefold(), [])
     if not matches:
         return f"Предшественник «{token}» не найден", 0

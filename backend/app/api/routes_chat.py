@@ -62,6 +62,7 @@ async def chat(
         await repo.add_chat_message(
             db, session_id=session_id, role="user", content=user_text, turn_id=turn_id
         )
+        await repo.add_chat_usage(db)
     agent = request.app.state.agent
 
     async def gen() -> AsyncIterator[dict[str, str]]:

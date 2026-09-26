@@ -1,9 +1,10 @@
+import ipaddress
 import uuid
 
 from fastapi import Request, Response
 
 from app.config import Settings
-from app.services.errors import BadOrigin, NoSession
+from app.services.errors import BadOrigin, NoSession, RateLimited
 from app.services.plan_service import PlanService
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
@@ -62,8 +63,38 @@ def client_ip(request: Request) -> str:
         hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",")]
         hops = [h for h in hops if h]
         if hops:
-            return hops[-1]
-    return request.client.host if request.client else "unknown"
+            return _limit_key(hops[-1])
+    return _limit_key(request.client.host) if request.client else "unknown"
+
+
+def _limit_key(host: str) -> str:
+    """One limit bucket per IPv4 address, but per /64 for IPv6: a single IPv6 host usually
+    controls its whole /64, so per-address limits would be trivially bypassed."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return host
+
+
+def limit_mutations(request: Request) -> None:
+    settings = request.app.state.settings
+    if not request.app.state.mutation_ip_limiter.allow(
+        client_ip(request), settings.mutation_limit_per_ip_hour
+    ):
+        raise RateLimited("Слишком много изменений плана с вашего адреса. Попробуйте позже.")
+
+
+def limit_imports(request: Request) -> None:
+    settings = request.app.state.settings
+    if not request.app.state.import_ip_limiter.allow(
+        client_ip(request), settings.import_limit_per_ip_hour
+    ):
+        raise RateLimited("Слишком много загрузок Excel с вашего адреса. Попробуйте позже.")
 
 
 def check_origin(request: Request) -> None:

@@ -18,6 +18,8 @@ async def purge_expired(
     """
     older_than = now - timedelta(days=ttl_days)
     async with sessionmaker() as db, db.begin():
+        # The daily chat quota only looks one day back.
+        await repo.prune_chat_usage(db, now - timedelta(days=2))
         return await repo.delete_expired_session_ids(db, older_than)
 
 

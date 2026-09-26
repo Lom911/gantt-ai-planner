@@ -52,7 +52,9 @@ def _task_dict(sp: ScheduledPlan, t: ScheduledTask) -> dict[str, Any]:
 def build_mcp(
     service: PlanService, *, today: Callable[[], date], auth: TokenVerifier | None = None
 ) -> FastMCP:
-    mcp = FastMCP("planner", instructions=INSTRUCTIONS, auth=auth)
+    # mask_error_details: an unexpected exception inside a tool reaches the MCP client (and the
+    # LLM's context) as a generic error, not its internal text; ToolError messages still pass.
+    mcp = FastMCP("planner", instructions=INSTRUCTIONS, auth=auth, mask_error_details=True)
 
     async def state() -> PlanState:
         try:

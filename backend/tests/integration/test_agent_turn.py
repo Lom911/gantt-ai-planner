@@ -168,3 +168,54 @@ async def test_text_from_separate_iterations_is_separated(app):
     async with app.state.service.sessionmaker() as db:
         msgs = await repo.recent_chat_messages(db, sid, 10)
     assert msgs[-1].content == "Смотрю план.\n\nГотово, всё в порядке."
+
+
+async def test_default_iteration_cap_is_small():
+    # Security audit M1: every iteration re-sends the whole context — 15 of them on a big plan
+    # cost millions of input tokens per turn. A normal turn needs 2-3.
+    import inspect
+
+    assert inspect.signature(Agent.__init__).parameters["max_iterations"].default <= 8
+
+
+async def test_large_tool_results_are_truncated_before_going_back_to_the_llm(app):
+    # Security audit M1: a 500-task get_plan result went into the context in full, every
+    # iteration. The plan is already in the system prompt; the tool result is capped.
+    from app.agent import loop as loop_module
+
+    seen: list[str] = []
+
+    class ReadsPlanTwice:
+        async def stream(self, *, system, tools, messages):
+            last = messages[-1]["content"]
+            if isinstance(last, list):
+                seen.append(last[0]["content"])
+            if len(messages) < 3:
+                call = LLMToolCall(id=f"g{len(messages)}", name="get_plan", input={})
+                yield Completed(
+                    LLMTurnResult(
+                        text="",
+                        tool_calls=[call],
+                        stop_reason="tool_use",
+                        content=[
+                            {"type": "tool_use", "id": call.id, "name": "get_plan", "input": {}}
+                        ],
+                    )
+                )
+            else:
+                yield Completed(
+                    LLMTurnResult(text="ok", tool_calls=[], stop_reason="end_turn", content=[])
+                )
+
+    sid = await new_sid(app)
+    old = loop_module.MAX_TOOL_RESULT_CHARS
+    loop_module.MAX_TOOL_RESULT_CHARS = 300
+    try:
+        agent = Agent(
+            ReadsPlanTwice(), app.state.tool_client, app.state.service, today=lambda: TODAY
+        )
+        await collect(agent, sid, "покажи план")
+    finally:
+        loop_module.MAX_TOOL_RESULT_CHARS = old
+    assert seen and all(len(s) <= 300 + 200 for s in seen)
+    assert "обрезан" in seen[0]

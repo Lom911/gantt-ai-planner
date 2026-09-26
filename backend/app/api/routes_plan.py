@@ -11,6 +11,8 @@ from app.api.deps import (
     check_origin,
     cookie_name,
     get_service,
+    limit_imports,
+    limit_mutations,
     require_session,
     set_session_cookie,
 )
@@ -65,7 +67,7 @@ async def get_plan(
     return to_plan_response(state, service.locks.is_busy(session_id))
 
 
-@router.post("/operations", dependencies=[Depends(check_origin)])
+@router.post("/operations", dependencies=[Depends(check_origin), Depends(limit_mutations)])
 async def apply_operations(
     request: Request, body: ApplyRequest, session_id: uuid.UUID = Depends(require_session)
 ) -> ApplyResponse:
@@ -86,7 +88,7 @@ async def apply_operations(
     )
 
 
-@router.post("/undo", dependencies=[Depends(check_origin)])
+@router.post("/undo", dependencies=[Depends(check_origin), Depends(limit_mutations)])
 async def undo(
     request: Request,
     body: VersionedRequest | None = None,
@@ -98,7 +100,7 @@ async def undo(
     return to_plan_response(state, service.locks.is_busy(session_id))
 
 
-@router.post("/redo", dependencies=[Depends(check_origin)])
+@router.post("/redo", dependencies=[Depends(check_origin), Depends(limit_mutations)])
 async def redo(
     request: Request,
     body: VersionedRequest | None = None,
@@ -110,14 +112,14 @@ async def redo(
     return to_plan_response(state, service.locks.is_busy(session_id))
 
 
-@router.post("/reset", dependencies=[Depends(check_origin)])
+@router.post("/reset", dependencies=[Depends(check_origin), Depends(limit_mutations)])
 async def reset(request: Request, session_id: uuid.UUID = Depends(require_session)) -> PlanResponse:
     service = get_service(request)
     state = await service.reset(session_id)
     return to_plan_response(state, service.locks.is_busy(session_id))
 
 
-@router.post("/import", dependencies=[Depends(check_origin)])
+@router.post("/import", dependencies=[Depends(check_origin), Depends(limit_imports)])
 async def import_plan(
     request: Request,
     file: UploadFile,
