@@ -30,16 +30,25 @@ class Settings(BaseSettings):
     # (e.g. a self-hosted OpenRouter-compatible gateway).
     llm_base_url: str | None = None
     llm_max_tokens: int = 4096
+    # Billed tokens (input + output + cache writes + cache reads) one chat turn may spend over
+    # all its LLM calls; past it the turn stops with `turn_budget_exceeded`.
+    llm_turn_token_budget: int = 300_000
 
     chat_limit_per_hour: int = 30
     chat_limit_per_day: int = 500
     # Per client IP (in-memory, sliding hour): new sessions and chat messages across sessions.
     session_limit_per_ip_hour: int = 20
     chat_limit_per_ip_hour: int = 60
+    # Sliding 24 h: without it a handful of addresses at the hourly cap could use up the whole
+    # app-wide chat_limit_per_day on their own.
+    chat_limit_per_ip_day: int = 150
     # Per client IP: plan mutations (operations/undo/redo/reset) and Excel imports. Each one
     # stores a full plan snapshot, so unbounded bursts from one client would grow the database.
     mutation_limit_per_ip_hour: int = 1200
     import_limit_per_ip_hour: int = 60
+    # Per client IP: every request to the external /mcp endpoint, authenticated or not (each
+    # bearer-token attempt costs a database lookup).
+    mcp_limit_per_ip_hour: int = 1200
     # Interactive API docs (/api/docs, /api/openapi.json): handy locally, off in production.
     api_docs: bool = True
     # Take the client IP from the last X-Forwarded-For hop (the one our reverse proxy set).
@@ -49,6 +58,9 @@ class Settings(BaseSettings):
     max_upload_mb: int = 2
     session_ttl_days: int = 14
     max_versions: int = 50
+    # Largest plan snapshot (compact UTF-8 JSON) a mutation or import may store; each session
+    # keeps up to max_versions of them.
+    max_plan_json_bytes: int = 1_500_000
     static_dir: str | None = None
     log_level: str = "INFO"
 

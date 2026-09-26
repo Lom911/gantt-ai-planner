@@ -60,6 +60,32 @@ async def test_chat_is_limited_per_ip_across_sessions(app):
     assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
 
 
+async def test_chat_is_limited_per_ip_per_day(app):
+    # Security audit: 9 addresses x 60/h could exhaust the app-wide daily quota on their own.
+    app.state.settings.chat_limit_per_ip_day = 1
+    async with _client(app) as a, _client(app) as b:
+        await a.post("/api/session")
+        await b.post("/api/session")
+        async with a.stream("POST", "/api/chat", json={"message": "привет"}) as r:
+            assert r.status_code == 200
+            [chunk async for chunk in r.aiter_text()]
+        r = await b.post("/api/chat", json={"message": "привет"})
+    assert r.status_code == 429 and r.json()["error"]["code"] == "rate_limited"
+    assert "сутки" in r.json()["error"]["message"]
+
+
+async def test_day_blocked_chat_attempts_do_not_use_up_the_hourly_limit(session_client, app):
+    app.state.settings.chat_limit_per_ip_day = 0
+    app.state.settings.chat_limit_per_ip_hour = 1
+    for _ in range(3):
+        r = await session_client.post("/api/chat", json={"message": "привет"})
+        assert r.status_code == 429 and "сутки" in r.json()["error"]["message"]
+    app.state.settings.chat_limit_per_ip_day = 10
+    async with session_client.stream("POST", "/api/chat", json={"message": "привет"}) as r:
+        assert r.status_code == 200
+        [chunk async for chunk in r.aiter_text()]
+
+
 def test_client_ip_without_peer_falls_back(app):
     request = Request({"type": "http", "headers": [], "client": None, "app": app})
     assert client_ip(request) == "unknown"

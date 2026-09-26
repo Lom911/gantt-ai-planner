@@ -53,3 +53,13 @@ class BadOrigin(DomainError):
 
 class FileTooLarge(DomainError):
     code = "file_too_large"
+
+
+class PlanTooLarge(DomainError):
+    code = "plan_too_large"
+
+    def __init__(self, limit_bytes: int) -> None:
+        super().__init__(
+            "План получился слишком большим: сократите описания задач или их число",
+            details={"limit_bytes": limit_bytes},
+        )

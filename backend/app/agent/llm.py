@@ -21,11 +21,40 @@ class LLMToolCall:
 
 
 @dataclass(frozen=True)
+class LLMUsage:
+    """Tokens one LLM call was billed for (the fake LLM reports zeros)."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+    @property
+    def total(self) -> int:
+        # Cache reads cost a fraction of an input token, but they are still billed.
+        return (
+            self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+        )
+
+    def __add__(self, other: "LLMUsage") -> "LLMUsage":
+        return LLMUsage(
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cache_creation_input_tokens + other.cache_creation_input_tokens,
+            self.cache_read_input_tokens + other.cache_read_input_tokens,
+        )
+
+
+@dataclass(frozen=True)
 class LLMTurnResult:
     text: str
     tool_calls: list[LLMToolCall]
     stop_reason: str
     content: list[dict[str, Any]] = field(default_factory=list)
+    usage: LLMUsage = field(default_factory=LLMUsage)
 
 
 @dataclass(frozen=True)
@@ -127,9 +156,25 @@ class AnthropicLLM:
         text = "".join(b.text for b in final.content if b.type == "text")
         yield Completed(
             LLMTurnResult(
-                text=text, tool_calls=calls, stop_reason=final.stop_reason or "", content=content
+                text=text,
+                tool_calls=calls,
+                stop_reason=final.stop_reason or "",
+                content=content,
+                usage=_usage(final.usage),
             )
         )
+
+
+def _usage(usage: anthropic.types.Usage | None) -> LLMUsage:
+    # The cache counters are optional in the API (and a compatible gateway may omit them).
+    if usage is None:
+        return LLMUsage()
+    return LLMUsage(
+        input_tokens=usage.input_tokens or 0,
+        output_tokens=usage.output_tokens or 0,
+        cache_creation_input_tokens=usage.cache_creation_input_tokens or 0,
+        cache_read_input_tokens=usage.cache_read_input_tokens or 0,
+    )
 
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"

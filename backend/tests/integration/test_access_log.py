@@ -37,3 +37,12 @@ async def test_plan_request_logs_sid_prefix_and_never_the_cookie_or_query_string
 
     for logged_line in lines:
         assert cookie_token not in logged_line
+
+
+async def test_requests_refused_by_the_mcp_gate_are_logged_too(client, app, caplog):
+    app.state.settings.mcp_limit_per_ip_hour = 0
+    with caplog.at_level(logging.INFO, logger="app.access"):
+        r = await client.post("/mcp", json={})
+    assert r.status_code == 429
+    lines = [rec.message for rec in caplog.records if rec.name == "app.access"]
+    assert any(line.startswith("POST /mcp 429") for line in lines)

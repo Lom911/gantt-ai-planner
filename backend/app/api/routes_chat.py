@@ -40,9 +40,18 @@ async def chat(
     settings = request.app.state.settings
     if service.locks.is_busy(session_id):
         raise AgentBusy()
-    per_ip = settings.chat_limit_per_ip_hour
-    if not request.app.state.chat_ip_limiter.allow(client_ip(request), per_ip):
+    ip = client_ip(request)
+    per_ip, per_ip_day = settings.chat_limit_per_ip_hour, settings.chat_limit_per_ip_day
+    day_limiter = request.app.state.chat_ip_day_limiter
+    # The day limit is checked first without recording, so a day-blocked address doesn't
+    # also burn its hourly slots; no await in between, so nothing can interleave.
+    if day_limiter.full(ip, per_ip_day):
+        raise RateLimited(
+            f"Лимит: {per_ip_day} сообщений в сутки с одного адреса. Попробуйте завтра."
+        )
+    if not request.app.state.chat_ip_limiter.allow(ip, per_ip):
         raise RateLimited(f"Лимит: {per_ip} сообщений в час с одного адреса. Попробуйте позже.")
+    day_limiter.allow(ip, per_ip_day)
     user_text = body.message.strip()
     turn_id = uuid.uuid4()
     # Check-then-reserve, atomically: without the advisory lock, two concurrent

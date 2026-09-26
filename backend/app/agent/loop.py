@@ -1,11 +1,16 @@
 import asyncio
+import logging
+import re
+import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing, suppress
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from app.agent.llm import LLM, Completed, LLMError, LLMTurnResult, TextDelta
+from app.agent.confirmation import is_explicit_confirmation
+from app.agent.llm import LLM, Completed, LLMError, LLMTurnResult, LLMUsage, TextDelta
 from app.agent.prompt import build_system
 from app.db import repo
 from app.db.models import ChatMessageRow
@@ -14,15 +19,67 @@ from app.domain.render import render_plan_table
 from app.mcp_server.client import PlanToolClient
 from app.services.plan_service import PlanService, PlanState
 
+trace_logger = logging.getLogger("app.agent.trace")
+_UNSAFE_LOG_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+
 MUTATING_TOOLS = {"apply_operations", "undo"}
 # Every iteration re-sends the whole conversation, so both knobs bound the LLM cost of a turn
 # (security audit M1): a normal turn is find → apply → answer, and the full plan is already in
 # the system prompt, so a huge tool result (get_plan on 500 tasks) is cut instead of re-sent.
 MAX_TOOL_RESULT_CHARS = 20_000
+# The third knob: real billed tokens, summed over the turn's LLM calls (see TurnStats).
+DEFAULT_TURN_TOKEN_BUDGET = 300_000
+# Prepended to the tool result when the loop dropped the model's confirmed=true (see _loop),
+# so the model asks the user instead of retrying the same call.
+CONFIRMATION_DROPPED_NOTE = (
+    "[confirmed=true не принят: в текущем сообщении пользователя нет явного подтверждения. "
+    "Спроси пользователя и дождись его ответа «да».]\n"
+)
 
 
 class TooManySteps(Exception):
     pass
+
+
+class TurnBudgetExceeded(Exception):
+    pass
+
+
+@dataclass
+class TurnStats:
+    """What one turn has done and cost so far, filled in by `_loop`."""
+
+    usage: LLMUsage = field(default_factory=LLMUsage)
+    iterations: int = 0  # LLM calls made
+    tools: list[str] = field(default_factory=list)  # tools run, in order
+    confirm_blocked: int = 0  # confirmed=true flags dropped by the guard in _loop
+
+
+def _trace(
+    session_id: uuid.UUID, turn_id: uuid.UUID, stats: TurnStats, outcome: str, seconds: float
+) -> None:
+    """One line per agent turn (roadmap «трейсинг вызовов LLM»): what it did and cost, for
+    cost and latency tracking. Like the access log: session id prefix only, never the
+    message text, the plan or the client address."""
+    u = stats.usage
+    # Tool names come from the model's output: keep them to a safe charset for the log line.
+    tools = ",".join(_UNSAFE_LOG_CHARS.sub("?", name)[:64] for name in stats.tools) or "-"
+    trace_logger.info(
+        "agent_turn sid=%s turn=%s outcome=%s iterations=%d tools=%s tokens_in=%d tokens_out=%d"
+        " cache_write=%d cache_read=%d tokens_total=%d confirm_blocked=%d duration_ms=%d",
+        str(session_id)[:8],
+        turn_id,
+        outcome,
+        stats.iterations,
+        tools,
+        u.input_tokens,
+        u.output_tokens,
+        u.cache_creation_input_tokens,
+        u.cache_read_input_tokens,
+        u.total,
+        stats.confirm_blocked,
+        round(seconds * 1000),
+    )
 
 
 class Agent:
@@ -36,6 +93,7 @@ class Agent:
         history_limit: int = 20,
         max_iterations: int = 8,
         turn_timeout: float = 180.0,
+        turn_token_budget: int = DEFAULT_TURN_TOKEN_BUDGET,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -44,6 +102,7 @@ class Agent:
         self._history_limit = history_limit
         self._max_iterations = max_iterations
         self._timeout = turn_timeout
+        self._turn_token_budget = turn_token_budget
 
     async def run_turn(
         self, session_id: uuid.UUID, user_text: str, *, turn_id: uuid.UUID | None = None
@@ -62,6 +121,9 @@ class Agent:
         message_already_saved = turn_id is not None
         turn_id = turn_id or uuid.uuid4()
         async with service.locks.agent_turn(session_id):
+            started = time.monotonic()
+            stats = TurnStats()
+            outcome = "aborted"  # client gone mid-stream, or an unexpected exception
             service.bus.publish(session_id, {"type": "agent_status", "busy": True})
             try:
                 async with service.sessionmaker() as db, db.begin():
@@ -79,7 +141,15 @@ class Agent:
                 failure: dict[str, Any] | None = None
                 try:
                     async with aclosing(
-                        self._bounded(session_id, turn_id, start, history, text_parts)
+                        self._bounded(
+                            session_id,
+                            turn_id,
+                            start,
+                            history,
+                            text_parts,
+                            stats,
+                            user_confirmed=is_explicit_confirmation(user_text),
+                        )
                     ) as bounded:
                         async for event in bounded:
                             yield event
@@ -92,6 +162,12 @@ class Agent:
                         "message": (
                             "Слишком много шагов за один запрос, попробуйте разбить его на части"
                         ),
+                    }
+                except TurnBudgetExceeded:
+                    failure = {
+                        "type": "error",
+                        "code": "turn_budget_exceeded",
+                        "message": "Ход слишком большой для одного запроса — сузьте его",
                     }
                 except TimeoutError:
                     failure = {
@@ -129,6 +205,7 @@ class Agent:
                         turn_id=turn_id,
                         meta=meta,
                     )
+                outcome = failure["code"] if failure else "done"
                 yield failure or {
                     "type": "done",
                     "turn_id": str(turn_id),
@@ -137,6 +214,7 @@ class Agent:
                 }
             finally:
                 service.bus.publish(session_id, {"type": "agent_status", "busy": False})
+                _trace(session_id, turn_id, stats, outcome, time.monotonic() - started)
 
     async def _bounded(
         self,
@@ -145,6 +223,9 @@ class Agent:
         start: PlanState,
         history: list[ChatMessageRow],
         text_parts: list[str],
+        stats: TurnStats,
+        *,
+        user_confirmed: bool,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Runs `_loop` in a background task and forwards its events, bounding the whole
         turn to `self._timeout` seconds via a wall-clock deadline.
@@ -162,7 +243,15 @@ class Agent:
 
         async def pump() -> None:
             try:
-                async for event in self._loop(session_id, turn_id, start, history, text_parts):
+                async for event in self._loop(
+                    session_id,
+                    turn_id,
+                    start,
+                    history,
+                    text_parts,
+                    stats,
+                    user_confirmed=user_confirmed,
+                ):
                     await queue.put(event)
             except Exception as exc:  # forwarded to the consumer below, not swallowed
                 await queue.put(exc)
@@ -196,6 +285,9 @@ class Agent:
         start: PlanState,
         history: list[ChatMessageRow],
         text_parts: list[str],
+        stats: TurnStats,
+        *,
+        user_confirmed: bool,
     ) -> AsyncIterator[dict[str, Any]]:
         system = build_system(render_plan_table(start.scheduled, self._today()))
         messages = to_llm_messages(history)
@@ -205,6 +297,7 @@ class Agent:
             # Text written before a tool call and text written after it are separate
             # paragraphs; without a separator they would run together ("…план.Готово").
             needs_separator = bool("".join(text_parts).strip())
+            stats.iterations += 1
             async for ev in self._llm.stream(system=system, tools=tools, messages=messages):
                 if isinstance(ev, TextDelta):
                     if needs_separator and ev.text.strip():
@@ -217,15 +310,33 @@ class Agent:
                     result = ev.result
             if result is None:
                 raise LLMError("llm_unavailable", "Пустой ответ LLM")
+            stats.usage += result.usage
             messages.append({"role": "assistant", "content": result.content})
             if not result.tool_calls:
                 return
+            if stats.usage.total > self._turn_token_budget:
+                # Checked only before acting on tool calls: a final answer is kept whatever it
+                # cost, but an over-budget turn neither runs its tools (a half-done edit behind
+                # an error message) nor pays for yet another round trip.
+                raise TurnBudgetExceeded()
             tool_results: list[dict[str, Any]] = []
             for call in result.tool_calls:
+                stats.tools.append(call.name)
                 yield {"type": "tool_started", "name": call.name}
-                r = await self._tools.call(
-                    call.name, call.input, session_id=session_id, turn_id=turn_id
+                args = call.input
+                # Security audit L3: only the user's own reply in THIS turn can confirm a mass
+                # deletion; a flag the model set on its own (text in the plan can talk it into
+                # that) is dropped, so the server answers confirmation_required again. External
+                # MCP clients don't go through here: their flag reaches the server as sent.
+                blocked = (
+                    call.name == "apply_operations"
+                    and not user_confirmed
+                    and args.get("confirmed", False) is not False
                 )
+                if blocked:
+                    args = {**args, "confirmed": False}
+                    stats.confirm_blocked += 1
+                r = await self._tools.call(call.name, args, session_id=session_id, turn_id=turn_id)
                 summary = r.text[:200] if r.is_error else (r.data or {}).get("summary")
                 yield {
                     "type": "tool_finished",
@@ -235,11 +346,14 @@ class Agent:
                 }
                 if call.name in MUTATING_TOOLS and not r.is_error and r.data:
                     yield {"type": "plan_changed", "version": r.data.get("version")}
+                content = _cap(r.text)
+                if blocked and r.is_error:
+                    content = CONFIRMATION_DROPPED_NOTE + content
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": call.id,
-                        "content": _cap(r.text),
+                        "content": content,
                         "is_error": r.is_error,
                     }
                 )
