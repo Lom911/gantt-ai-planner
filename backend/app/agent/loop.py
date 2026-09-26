@@ -1,4 +1,7 @@
 import asyncio
+import logging
+import re
+import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing, suppress
@@ -14,6 +17,9 @@ from app.domain.diff import diff_plans, summarize_changes
 from app.domain.render import render_plan_table
 from app.mcp_server.client import PlanToolClient
 from app.services.plan_service import PlanService, PlanState
+
+trace_logger = logging.getLogger("app.agent.trace")
+_UNSAFE_LOG_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 MUTATING_TOOLS = {"apply_operations", "undo"}
 # Every iteration re-sends the whole conversation, so both knobs bound the LLM cost of a turn
@@ -34,9 +40,37 @@ class TurnBudgetExceeded(Exception):
 
 @dataclass
 class TurnStats:
-    """What one turn has cost so far, filled in by `_loop`."""
+    """What one turn has done and cost so far, filled in by `_loop`."""
 
     usage: LLMUsage = field(default_factory=LLMUsage)
+    iterations: int = 0  # LLM calls made
+    tools: list[str] = field(default_factory=list)  # tools run, in order
+
+
+def _trace(
+    session_id: uuid.UUID, turn_id: uuid.UUID, stats: TurnStats, outcome: str, seconds: float
+) -> None:
+    """One line per agent turn (roadmap «трейсинг вызовов LLM»): what it did and cost, for
+    cost and latency tracking. Like the access log: session id prefix only, never the
+    message text, the plan or the client address."""
+    u = stats.usage
+    # Tool names come from the model's output: keep them to a safe charset for the log line.
+    tools = ",".join(_UNSAFE_LOG_CHARS.sub("?", name)[:64] for name in stats.tools) or "-"
+    trace_logger.info(
+        "agent_turn sid=%s turn=%s outcome=%s iterations=%d tools=%s tokens_in=%d tokens_out=%d"
+        " cache_write=%d cache_read=%d tokens_total=%d duration_ms=%d",
+        str(session_id)[:8],
+        turn_id,
+        outcome,
+        stats.iterations,
+        tools,
+        u.input_tokens,
+        u.output_tokens,
+        u.cache_creation_input_tokens,
+        u.cache_read_input_tokens,
+        u.total,
+        round(seconds * 1000),
+    )
 
 
 class Agent:
@@ -78,6 +112,9 @@ class Agent:
         message_already_saved = turn_id is not None
         turn_id = turn_id or uuid.uuid4()
         async with service.locks.agent_turn(session_id):
+            started = time.monotonic()
+            stats = TurnStats()
+            outcome = "aborted"  # client gone mid-stream, or an unexpected exception
             service.bus.publish(session_id, {"type": "agent_status", "busy": True})
             try:
                 async with service.sessionmaker() as db, db.begin():
@@ -92,7 +129,6 @@ class Agent:
                     history = await repo.recent_chat_messages(db, session_id, self._history_limit)
                 start = await service.get_state(session_id)
                 text_parts: list[str] = []
-                stats = TurnStats()
                 failure: dict[str, Any] | None = None
                 try:
                     async with aclosing(
@@ -152,6 +188,7 @@ class Agent:
                         turn_id=turn_id,
                         meta=meta,
                     )
+                outcome = failure["code"] if failure else "done"
                 yield failure or {
                     "type": "done",
                     "turn_id": str(turn_id),
@@ -160,6 +197,7 @@ class Agent:
                 }
             finally:
                 service.bus.publish(session_id, {"type": "agent_status", "busy": False})
+                _trace(session_id, turn_id, stats, outcome, time.monotonic() - started)
 
     async def _bounded(
         self,
@@ -232,6 +270,7 @@ class Agent:
             # Text written before a tool call and text written after it are separate
             # paragraphs; without a separator they would run together ("…план.Готово").
             needs_separator = bool("".join(text_parts).strip())
+            stats.iterations += 1
             async for ev in self._llm.stream(system=system, tools=tools, messages=messages):
                 if isinstance(ev, TextDelta):
                     if needs_separator and ev.text.strip():
@@ -255,6 +294,7 @@ class Agent:
                 raise TurnBudgetExceeded()
             tool_results: list[dict[str, Any]] = []
             for call in result.tool_calls:
+                stats.tools.append(call.name)
                 yield {"type": "tool_started", "name": call.name}
                 r = await self._tools.call(
                     call.name, call.input, session_id=session_id, turn_id=turn_id

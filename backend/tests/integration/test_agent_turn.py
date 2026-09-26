@@ -1,3 +1,5 @@
+import logging
+import re
 from datetime import date
 
 from app.agent.llm import (
@@ -309,3 +311,61 @@ async def test_a_final_answer_over_the_budget_still_completes_the_turn(app):
 async def test_turn_token_budget_comes_from_settings(app):
     assert app.state.settings.llm_turn_token_budget == 300_000
     assert app.state.agent._turn_token_budget == app.state.settings.llm_turn_token_budget
+
+
+def _trace_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "app.agent.trace"]
+
+
+async def test_each_turn_logs_one_trace_line_without_content(app, caplog):
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        events = await collect(app.state.agent, sid, "Сдвинь все задачи Дмитрия на 3 дня")
+    [line] = _trace_lines(caplog)
+    assert line.startswith("agent_turn ")
+    assert f"sid={str(sid)[:8]} " in line and str(sid) not in line
+    assert f"turn={events[-1]['turn_id']} " in line
+    assert " outcome=done " in line
+    assert " iterations=3 " in line
+    assert " tools=find_tasks,apply_operations " in line
+    assert " tokens_in=0 tokens_out=0 cache_write=0 cache_read=0 tokens_total=0 " in line
+    assert re.search(r" duration_ms=\d+$", line)
+    # No message text, no plan content (names, people), no address.
+    assert "Сдвин" not in line and "Дмитри" not in line and "127.0.0.1" not in line
+
+
+async def test_trace_line_sums_tokens_and_names_the_error(app, caplog):
+    class Looping:
+        async def stream(self, *, system, tools, messages):
+            usage = LLMUsage(input_tokens=100, output_tokens=5, cache_read_input_tokens=1000)
+            yield Completed(_tool_turn(f"x{len(messages)}", "get_plan", {}, usage))
+
+    sid = await new_sid(app)
+    agent = Agent(
+        Looping(), app.state.tool_client, app.state.service, today=lambda: TODAY, max_iterations=2
+    )
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        await collect(agent, sid, "зациклись")
+    [line] = _trace_lines(caplog)
+    assert " outcome=too_many_steps " in line and " iterations=2 " in line
+    assert " tools=get_plan,get_plan " in line
+    assert " tokens_in=200 tokens_out=10 cache_write=0 cache_read=2000 tokens_total=2210 " in line
+
+
+async def test_trace_line_is_logged_for_a_turn_without_tools(app, caplog):
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        await collect(app.state.agent, sid, "привет")
+    [line] = _trace_lines(caplog)
+    assert " outcome=done iterations=1 tools=- " in line
+
+
+async def test_trace_line_is_logged_when_the_client_goes_away(app, caplog):
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        turn = app.state.agent.run_turn(sid, "Перенеси задачу 1 на 2 дня")
+        await anext(turn)
+        await turn.aclose()
+    [line] = _trace_lines(caplog)
+    assert " outcome=aborted " in line
+    assert not app.state.service.locks.is_busy(sid)
