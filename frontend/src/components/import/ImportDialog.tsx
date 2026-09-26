@@ -6,6 +6,7 @@ import type { ImportIssue } from "@/api/types";
 import { PLAN_KEY } from "@/hooks/usePlan";
 import { CHAT_HISTORY_KEY } from "@/hooks/useChat";
 import { nextMonday, toISODate } from "@/lib/dates";
+import { uploadSizeError } from "@/lib/upload";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 
 function issueText(issue: ImportIssue): string {
@@ -81,7 +82,13 @@ export function ImportDialog({ open, onOpenChange }: { open: boolean; onOpenChan
             <input
               type="file"
               accept=".xlsx"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => {
+                const picked = e.target.files?.[0] ?? null;
+                setFile(picked);
+                setErrors([]);
+                setWarnings([]);
+                setGeneralError(picked ? uploadSizeError(picked.size) : null);
+              }}
               className="rounded-md border border-input bg-background px-2 py-1 text-sm"
             />
           </label>
@@ -124,7 +131,7 @@ export function ImportDialog({ open, onOpenChange }: { open: boolean; onOpenChan
             <button
               type="button"
               className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
-              disabled={!file || loading}
+              disabled={!file || loading || (file != null && uploadSizeError(file.size) != null)}
               onClick={() => void handleSubmit()}
             >
               Загрузить

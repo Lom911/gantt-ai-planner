@@ -1,10 +1,12 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { api } from "@/api/client";
 import { McpConnectDialog } from "./McpConnectDialog";
 
 vi.mock("@/api/client", async () => {
   const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
-  return { ...actual, api: { createMcpToken: vi.fn(), revokeMcpToken: vi.fn() } };
+  return { ...actual, api: { createMcpToken: vi.fn(), revokeMcpToken: vi.fn(), mcpTokenStatus: vi.fn() } };
 });
 
 const sample = {
@@ -20,7 +22,13 @@ const sample = {
   },
 };
 
+const render = (ui: ReactElement) =>
+  rtlRender(<QueryClientProvider client={new QueryClient()}>{ui}</QueryClientProvider>);
+
+const inactive = { active: false, prefix: null, created_at: null, expires_at: null, last_used_at: null };
+
 beforeEach(() => {
+  vi.mocked(api.mcpTokenStatus).mockResolvedValue(inactive);
   vi.mocked(api.createMcpToken).mockResolvedValue(sample);
   vi.mocked(api.revokeMcpToken).mockResolvedValue(undefined);
   Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
@@ -51,4 +59,20 @@ test("revoking clears the shown token", async () => {
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Выпустить токен" })).toBeInTheDocument(),
   );
+});
+
+test("shows a live token's status and lets the user revoke it without having the token", async () => {
+  vi.mocked(api.mcpTokenStatus).mockResolvedValue({
+    active: true,
+    prefix: "mcp_ab12",
+    created_at: "2026-09-26T10:00:00Z",
+    expires_at: "2026-10-03T10:00:00Z",
+    last_used_at: null,
+  });
+  render(<McpConnectDialog open onOpenChange={() => {}} />);
+  expect(await screen.findByText(/Активный токен/)).toHaveTextContent("mcp_ab12");
+  expect(screen.getByText(/ещё не использовался/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Отозвать" }));
+  await waitFor(() => expect(api.revokeMcpToken).toHaveBeenCalled());
+  expect(screen.getByRole("button", { name: /Выпустить новый токен/ })).toBeInTheDocument();
 });
