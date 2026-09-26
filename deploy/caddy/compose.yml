@@ -3,11 +3,18 @@
 # including gantt-ai-planner.duckdns.org. Started by deploy/bootstrap.sh
 # and left running independently of the app stack's deploys.
 #
-# Only touches the 'edge' network and ports 80/443 - never other services
-# on this shared host.
+# Networks (both external, created once by deploy/bootstrap.sh):
+#   - edge: shared with the other sites' upstreams on this host.
+#   - planner-proxy: internal (no route out), shared ONLY with the planner
+#     `app` container, which Caddy reaches as `planner-app:8000`. The app is
+#     not on `edge`, so nothing but Caddy can talk to it.
+# Only touches these networks and ports 80/443 - never other services on
+# this shared host.
 
 networks:
   edge:
+    external: true
+  planner-proxy:
     external: true
 
 volumes:
@@ -29,6 +36,7 @@ services:
       - caddy_config:/config
     networks:
       - edge
+      - planner-proxy
     logging:
       driver: json-file
       options:

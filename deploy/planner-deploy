@@ -7,12 +7,24 @@
 # `sudo planner-deploy <tag>` from planner-deploy-wrapper (the forced
 # command for the 'deploy' SSH user) - never run directly over SSH by an
 # untrusted caller.
+#
+# <tag> is `sha-<hex>` or, as CD sends it, `sha-<hex>@sha256:<digest>`: the
+# digest pins the exact image CI scanned and pushed (GHCR tags are mutable).
+# Compose accepts `name:tag@digest` references, so the value goes into
+# IMAGE_TAG in .env as is.
+#
+# Flow: pull the new image -> pg_dump snapshot of the database -> write the
+# new tag to .env -> `up -d` (runs `migrate`, recreates `app`) -> health
+# check. A failure before .env is written changes nothing; a failure after
+# it restores the previous tag and restarts only `app` (see finish()).
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
 ENV_FILE="$APP_DIR/.env"
 COMPOSE_FILE="$APP_DIR/compose.prod.yml"
-TAG_RE='^sha-[0-9a-f]{7,40}$'
+BACKUP_DIR=/var/backups/gantt-planner
+SNAPSHOT_RETENTION_DAYS=7
+TAG_RE='^sha-[0-9a-f]{7,40}(@sha256:[0-9a-f]{64})?$'
 HEALTH_TIMEOUT=60
 HEALTH_INTERVAL=3
 
@@ -40,16 +52,29 @@ fi
 
 cd "$APP_DIR"
 
-prev_tag="$(grep -E '^IMAGE_TAG=' "$ENV_FILE" | tail -n1 | cut -d= -f2-)"
+prev_tag="$({ grep -E '^IMAGE_TAG=' "$ENV_FILE" || true; } | tail -n1 | cut -d= -f2-)"
 if [ -z "$prev_tag" ]; then
     echo "planner-deploy: could not read current IMAGE_TAG from $ENV_FILE" >&2
+    echo "  (the first release is deployed by hand, see docs/runbook.md section 1)" >&2
+    exit 1
+fi
+# .env is the rollback target: a value that is not a tag we would accept from
+# CI (hand-edited, `latest`, stray characters) must never be written back and
+# started by the rollback path, so refuse to deploy on top of it at all.
+if ! [[ "$prev_tag" =~ $TAG_RE ]]; then
+    echo "planner-deploy: current IMAGE_TAG '$prev_tag' in $ENV_FILE is not a valid tag" >&2
+    echo "  (must match $TAG_RE); fix it by hand before deploying" >&2
     exit 1
 fi
 
 set_tag() {
     tag="$1"
     if grep -qE '^IMAGE_TAG=' "$ENV_FILE"; then
-        sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${tag}/" "$ENV_FILE"
+        # The value contains '@' and ':' (digest form). It is TAG_RE-validated, but
+        # still use a delimiter that TAG_RE can never produce and escape everything
+        # that is special in a sed replacement, so sed can only ever copy it verbatim.
+        tag_escaped="$(printf '%s' "$tag" | sed -e 's/[\\|&]/\\&/g')"
+        sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${tag_escaped}|" "$ENV_FILE"
     else
         echo "IMAGE_TAG=${tag}" >> "$ENV_FILE"
     fi
@@ -73,23 +98,62 @@ compose() {
     docker compose -f "$COMPOSE_FILE" "$@"
 }
 
+# pg_dump of the live database right before the new release can migrate it:
+# the way back if a migration turns out to be destructive (restore by hand,
+# docs/runbook.md section 2). Written to a .tmp and renamed, so a failed or
+# interrupted dump never looks like a usable snapshot.
+snapshot_file=""
+snapshot_tmp=""
+snapshot_db() {
+    (umask 077 && mkdir -p "$BACKUP_DIR") || return 1
+    snapshot_file="$BACKUP_DIR/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
+    snapshot_tmp="$snapshot_file.tmp"
+    if ! (umask 077 && compose exec -T db pg_dump -U planner_owner -Fc planner > "$snapshot_tmp"); then
+        echo "planner-deploy: pg_dump failed" >&2
+        return 1
+    fi
+    if [ ! -s "$snapshot_tmp" ]; then
+        echo "planner-deploy: pg_dump produced an empty file" >&2
+        return 1
+    fi
+    chmod 0600 "$snapshot_tmp" || return 1
+    mv "$snapshot_tmp" "$snapshot_file" || return 1
+    snapshot_tmp=""
+    find "$BACKUP_DIR" -maxdepth 1 -name 'pre-deploy-*.dump' \
+        -mtime "+${SNAPSHOT_RETENTION_DAYS}" -delete || true
+    echo "planner-deploy: pre-deploy snapshot $snapshot_file ($(wc -c < "$snapshot_file") bytes)"
+}
+
 # From the moment .env names the new tag until the new stack is confirmed
 # healthy, ANY exit (a failed command, a failed check, set -e, a signal)
 # restores the previous tag and restarts it. The EXIT trap is the single
 # rollback path, so no failure can leave .env pointing at a tag that was
 # never successfully deployed (the next reboot / `up -d` would start it, and
 # the next deploy would treat it as the rollback target).
+#
+# The rollback restarts `app` only (`up -d --no-deps app`) and never re-runs
+# `migrate`: if the new release already applied a migration, the previous
+# image's alembic does not know that revision, `alembic upgrade head` would
+# fail, and `app` (depends_on: migrate completed) would never start. That is
+# why migrations must be backward compatible - the previous app has to run
+# on the migrated schema (docs/runbook.md section 2).
 env_written=0
 deployed=0
 finish() {
     status=$?
     trap - EXIT
+    [ -z "$snapshot_tmp" ] || rm -f "$snapshot_tmp"
     if [ "$env_written" -eq 1 ] && [ "$deployed" -eq 0 ]; then
-        echo "planner-deploy: rolling back to '$prev_tag'" >&2
+        echo "planner-deploy: rolling back to '$prev_tag' (app only, migrations are not re-run)" >&2
         set_tag "$prev_tag" || echo "planner-deploy: FAILED to restore IMAGE_TAG in $ENV_FILE" >&2
-        if ! compose up -d; then
-            echo "planner-deploy: rollback 'up -d' failed - manual intervention needed" >&2
+        if ! compose up -d --no-deps app; then
+            echo "planner-deploy: rollback 'up -d --no-deps app' failed - manual intervention needed" >&2
+        elif wait_healthy; then
+            echo "planner-deploy: rolled back, '$prev_tag' is healthy" >&2
+        else
+            echo "planner-deploy: rolled back to '$prev_tag' but it is not healthy either - manual intervention needed" >&2
         fi
+        echo "planner-deploy: pre-deploy snapshot of the database: $snapshot_file" >&2
         [ "$status" -ne 0 ] || status=1
     fi
     exit "$status"
@@ -103,6 +167,13 @@ echo "planner-deploy: deploying '$new_tag' (previous: '$prev_tag')"
 # the running stack are left exactly as they were.
 if ! IMAGE_TAG="$new_tag" compose pull app migrate; then
     echo "planner-deploy: pull of '$new_tag' failed; nothing changed (still '$prev_tag')" >&2
+    exit 1
+fi
+
+# Snapshot as late as possible (after the pull), but before anything changes:
+# no snapshot, no deploy.
+if ! snapshot_db; then
+    echo "planner-deploy: pre-deploy snapshot failed; nothing changed (still '$prev_tag')" >&2
     exit 1
 fi
 

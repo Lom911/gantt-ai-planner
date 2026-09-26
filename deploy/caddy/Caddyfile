@@ -33,6 +33,8 @@ gantt-ai-planner.duckdns.org {
 		-Server
 	}
 
+	# planner-app = the app's alias on the internal `planner-proxy` network, which only
+	# Caddy and the app share (deploy/compose.prod.yml, deploy/caddy/compose.yml).
 	reverse_proxy planner-app:8000 {
 		flush_interval -1
 	}

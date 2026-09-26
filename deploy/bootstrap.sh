@@ -9,7 +9,9 @@
 # Every step is safe to re-run and only echoes what it does. This script
 # NEVER touches any other service on the host, never opens/closes ports,
 # and never runs ufw - it only manages the 'deploy' user, the
-# /opt/gantt-planner and /opt/caddy stacks, and the backup cron job.
+# /opt/gantt-planner and /opt/caddy stacks, the Docker networks 'edge'
+# (Caddy <-> other sites) and 'planner-proxy' (internal, Caddy <-> app
+# only), and the backup cron job.
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
@@ -94,10 +96,16 @@ step_compose_files() {
     install -m 0755 -o root -g root "$SCRIPT_DIR/initdb/10-roles.sh" "$APP_DIR/initdb/10-roles.sh"
 
     if [ ! -f "$APP_DIR/.env" ]; then
-        printf 'IMAGE_TAG=latest\nLLM_PROVIDER=openrouter\nLLM_MODEL=anthropic/claude-sonnet-5\n' > "$APP_DIR/.env"
+        # No IMAGE_TAG on purpose (no silent `latest`): compose.prod.yml refuses to run
+        # without one, and the first release sets an explicit sha tag by hand
+        # (docs/runbook.md section 1); planner-deploy maintains it from then on.
+        (umask 177 && printf '%s\n' \
+            '# IMAGE_TAG=sha-<commit>  <- added by the first manual deploy (docs/runbook.md section 1)' \
+            'LLM_PROVIDER=openrouter' \
+            'LLM_MODEL=anthropic/claude-sonnet-5' > "$APP_DIR/.env")
         chmod 0600 "$APP_DIR/.env"
         chown root:root "$APP_DIR/.env"
-        echo "    created $APP_DIR/.env with IMAGE_TAG=latest, LLM_PROVIDER=openrouter, LLM_MODEL=anthropic/claude-sonnet-5"
+        echo "    created $APP_DIR/.env with LLM_PROVIDER=openrouter, LLM_MODEL=anthropic/claude-sonnet-5 (no IMAGE_TAG yet)"
     else
         echo "    $APP_DIR/.env already exists, leaving it untouched"
     fi
@@ -114,6 +122,13 @@ step_compose_files() {
             echo "    installed $CADDY_DIR/$file"
         fi
     done
+    # The app is reachable only over 'planner-proxy': a Caddy stack that predates it
+    # would lose the site as soon as the app is recreated.
+    if ! grep -q 'planner-proxy' "$CADDY_DIR/compose.yml"; then
+        echo "    ACTION NEEDED: $CADDY_DIR/compose.yml does not attach Caddy to 'planner-proxy'." >&2
+        echo "    Add it (see deploy/caddy/compose.yml and docs/runbook.md) and recreate Caddy" >&2
+        echo "    BEFORE recreating the app, or gantt-ai-planner.duckdns.org answers 502." >&2
+    fi
 }
 
 step_secrets() {
@@ -121,9 +136,20 @@ step_secrets() {
     for name in db_app_password db_owner_password pg_superuser_password; do
         secret_file="$SECRETS_DIR/$name"
         if [ ! -f "$secret_file" ]; then
-            (umask 177 && openssl rand -base64 32 > "$secret_file")
-            chmod 0444 "$secret_file"
-            chown root:root "$secret_file"
+            # Generate into a temp file in the same directory and rename it into place
+            # only once it is complete and non-empty: a failed/killed openssl must never
+            # leave an empty secret file behind, which the next run would treat as
+            # existing and Postgres would then initialise the role with an empty password.
+            tmp_secret="$(mktemp "$SECRETS_DIR/.$name.XXXXXX")"
+            if (umask 177 && openssl rand -base64 32 > "$tmp_secret") && [ -s "$tmp_secret" ]; then
+                chmod 0444 "$tmp_secret"
+                chown root:root "$tmp_secret"
+                mv -f "$tmp_secret" "$secret_file"
+            else
+                rm -f "$tmp_secret"
+                echo "    FAILED to generate $secret_file (openssl rand), aborting" >&2
+                exit 1
+            fi
             echo "    generated $secret_file"
         else
             echo "    $secret_file already exists, leaving it untouched"
@@ -157,6 +183,22 @@ step_network() {
         docker network create edge
         echo "    created network 'edge'"
     fi
+
+    # Caddy <-> app only. --internal: no gateway, so nothing reaches the internet
+    # through it (the app has its own project-local `egress` network for that).
+    echo "==> Ensuring internal docker network 'planner-proxy' exists"
+    if docker network inspect planner-proxy >/dev/null 2>&1; then
+        if [ "$(docker network inspect -f '{{.Internal}}' planner-proxy)" = "true" ]; then
+            echo "    network 'planner-proxy' already exists (internal)"
+        else
+            echo "    network 'planner-proxy' exists but is NOT internal - recreate it with" >&2
+            echo "    'docker network create --internal planner-proxy' (detach caddy and app first)" >&2
+            exit 1
+        fi
+    else
+        docker network create --internal planner-proxy
+        echo "    created internal network 'planner-proxy'"
+    fi
 }
 
 step_caddy() {
@@ -189,8 +231,13 @@ main() {
     echo "         $APP_DIR/.env) or $SECRETS_DIR/anthropic_api_key if using a real Anthropic key instead"
     echo "      2. add the CI deploy key to /home/$DEPLOY_USER/.ssh/authorized_keys (see step above)"
     echo "      3. point the gantt-ai-planner.duckdns.org A record at this host's IP"
-    echo "      4. run the first deploy manually: set IMAGE_TAG=sha-<commit> in $APP_DIR/.env, then"
-    echo "         cd $APP_DIR && docker compose -f compose.prod.yml up -d"
+    echo "      4. run the first deploy manually with an explicit tag (docs/runbook.md section 1):"
+    echo "         echo 'IMAGE_TAG=sha-<commit>' >> $APP_DIR/.env"
+    echo "         cd $APP_DIR && docker compose -f compose.prod.yml pull && docker compose -f compose.prod.yml up -d"
 }
 
-main "$@"
+# Run only when executed (`bash deploy/bootstrap.sh`), not when sourced:
+# deploy/tests/test_bootstrap_secrets.sh sources this file to test single steps.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

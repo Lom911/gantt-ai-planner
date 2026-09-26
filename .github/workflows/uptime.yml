@@ -1,0 +1,129 @@
+name: Uptime
+
+# External uptime check of production with alerting through GitHub issues:
+# - failure (after retries) -> opens an issue labelled `uptime`, or comments on
+#   the one already open, and fails the run (GitHub also emails the failure);
+# - success -> closes any open `uptime` issue with a recovery comment.
+# Scheduled runs only happen on the default branch and may start late when
+# Actions is busy; GitHub disables schedules after 60 days without repository
+# activity (re-enable in the Actions tab). See docs/runbook.md section 6.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE_URL: https://gantt-ai-planner.duckdns.org
+      ATTEMPTS: "3"
+      RETRY_DELAY: "20"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Probe /healthz and /api/meta
+        id: probe
+        run: |
+          # Actions starts steps with `bash -e`: switch it off, every failure here is handled.
+          set +e -uo pipefail
+          report="$RUNNER_TEMP/uptime-report.md"
+
+          # check_once: 0 if both endpoints are fine, else 1 with the reasons in $problems.
+          check_once() {
+            problems=""
+            body="$RUNNER_TEMP/body.json"
+
+            code="$(curl -sS -o "$body" -w '%{http_code}' --max-time 15 "$BASE_URL/healthz" 2>"$RUNNER_TEMP/curl.err")" || code="000"
+            if [ "$code" != "200" ]; then
+              problems+="- \`/healthz\`: HTTP $code $(head -c 200 "$RUNNER_TEMP/curl.err" | tr '\n' ' ')"$'\n'
+            elif [ "$(jq -r '.status // empty' "$body" 2>/dev/null)" != "ok" ]; then
+              problems+="- \`/healthz\`: HTTP 200 but body is not {\"status\":\"ok\"}: \`$(head -c 200 "$body" | tr -d '\n`')\`"$'\n'
+            fi
+
+            code="$(curl -sS -o "$body" -w '%{http_code}' --max-time 15 "$BASE_URL/api/meta" 2>"$RUNNER_TEMP/curl.err")" || code="000"
+            if [ "$code" != "200" ]; then
+              problems+="- \`/api/meta\`: HTTP $code $(head -c 200 "$RUNNER_TEMP/curl.err" | tr '\n' ' ')"$'\n'
+            else
+              mode="$(jq -r '.llm_mode // empty' "$body" 2>/dev/null)"
+              if [ -z "$mode" ]; then
+                problems+="- \`/api/meta\`: HTTP 200 but no \`llm_mode\` in \`$(head -c 200 "$body" | tr -d '\n`')\`"$'\n'
+              elif [ "$mode" = "fake" ]; then
+                problems+="- \`/api/meta\`: \`llm_mode\` is \`fake\` - the LLM API key is missing/empty on the server (demo mode in production)"$'\n'
+              fi
+            fi
+            [ -z "$problems" ]
+          }
+
+          healthy=false
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            if check_once; then
+              healthy=true
+              echo "attempt $attempt/$ATTEMPTS: OK (llm_mode=$mode)"
+              break
+            fi
+            echo "attempt $attempt/$ATTEMPTS failed:"
+            printf '%s' "$problems"
+            [ "$attempt" -lt "$ATTEMPTS" ] && sleep "$RETRY_DELAY"
+          done
+
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ "$healthy" = true ]; then
+            printf 'Production is healthy again as of %s (%s).\n' "$now" "$RUN_URL" > "$report"
+          else
+            {
+              printf 'Uptime check failed at **%s** after %s attempts %ss apart (%s).\n\n' \
+                "$now" "$ATTEMPTS" "$RETRY_DELAY" "$RUN_URL"
+              printf 'Last attempt:\n\n%s\n' "$problems"
+              printf '%s\n' 'Runbook: docs/runbook.md, section 6 (uptime monitoring).'
+            } > "$report"
+          fi
+          echo "healthy=$healthy" >> "$GITHUB_OUTPUT"
+          echo "report=$report" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the uptime issue
+        if: steps.probe.outputs.healthy == 'false'
+        env:
+          REPORT: ${{ steps.probe.outputs.report }}
+        run: |
+          set -euo pipefail
+          gh label create uptime --color B60205 \
+            --description "Production uptime check is failing (opened by the Uptime workflow)" --force
+          issue="$(gh issue list --label uptime --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file "$REPORT"
+            echo "commented on #$issue"
+          else
+            gh issue create --title "Production is down or degraded: gantt-ai-planner.duckdns.org" \
+              --label uptime --body-file "$REPORT"
+          fi
+
+      - name: Close the uptime issue on recovery
+        if: steps.probe.outputs.healthy == 'true'
+        env:
+          REPORT: ${{ steps.probe.outputs.report }}
+        run: |
+          set -euo pipefail
+          # No label yet means no uptime issue was ever opened: nothing to close.
+          issues="$(gh issue list --label uptime --state open --json number --jq '.[].number' 2>/dev/null || true)"
+          for issue in $issues; do
+            gh issue close "$issue" --reason completed --comment "$(cat "$REPORT")"
+            echo "closed #$issue"
+          done
+
+      - name: Fail the run while production is unhealthy
+        if: steps.probe.outputs.healthy == 'false'
+        run: |
+          echo "::error::uptime check failed - see the open 'uptime' issue"
+          exit 1

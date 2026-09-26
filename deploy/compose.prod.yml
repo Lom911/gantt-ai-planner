@@ -3,18 +3,29 @@
 #   docker compose -f compose.prod.yml up -d
 # from /opt/gantt-planner (so relative secrets:/ .env resolve correctly).
 #
+# IMAGE_TAG (in .env) names the app image: `sha-<hex>`, or `sha-<hex>@sha256:<digest>`
+# as written by planner-deploy for CD releases. There is deliberately no default
+# (no silent `latest`): without it every compose command fails fast.
+#
 # Networks:
-#   - edge: external, shared with the host's Caddy reverse-proxy stack
-#     (/opt/caddy). Created once by deploy/bootstrap.sh.
-#   - backend: internal-only, app <-> db traffic never reaches the host.
+#   - planner-proxy: external AND internal (no route out of it), created once by
+#     deploy/bootstrap.sh (`docker network create --internal planner-proxy`).
+#     Only the Caddy reverse proxy (/opt/caddy) and `app` are attached, so no
+#     other container on this shared host can reach the app directly. Caddy
+#     finds the app by its alias `planner-app` on this network.
+#   - backend: internal-only, app/migrate <-> db traffic never leaves it.
+#   - egress: project-local bridge network shared with nothing else - the
+#     app's only route out (outbound HTTPS to the LLM API: OpenRouter/Anthropic).
+#   The app is deliberately NOT on Caddy's shared `edge` network.
 #
 # See docs/runbook.md for operational procedures.
 
 networks:
-  edge:
+  planner-proxy:
     external: true
   backend:
     internal: true
+  egress: {}
 
 secrets:
   anthropic_api_key:
@@ -45,6 +56,20 @@ services:
       - ./initdb:/docker-entrypoint-initdb.d:ro
     networks:
       - backend
+    # The entrypoint starts as root only to fix ownership/modes of the data dir
+    # (CHOWN, FOWNER, DAC_OVERRIDE: the bind mount is 0700 70:70), then drops to
+    # the postgres user (SETUID, SETGID via su-exec). Nothing else is needed.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
     restart: unless-stopped
     logging:
       driver: json-file
@@ -59,7 +84,7 @@ services:
       start_period: 10s
 
   migrate:
-    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG}
+    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
     command: ["alembic", "upgrade", "head"]
     environment:
       DB_HOST: db
@@ -79,11 +104,12 @@ services:
     # owner (DDL) password, so it gets no more privileges than the app itself.
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64m,mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    pids_limit: 128
     restart: "no"
     logging:
       driver: json-file
@@ -92,7 +118,7 @@ services:
         max-file: "3"
 
   app:
-    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG}
+    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
     environment:
       DB_HOST: db
       DB_PORT: "5432"
@@ -103,9 +129,10 @@ services:
       LLM_MODEL: ${LLM_MODEL:-anthropic/claude-sonnet-5}
       COOKIE_SECURE: "true"
       PUBLIC_ORIGIN: https://gantt-ai-planner.duckdns.org
-      # The app publishes no ports: requests only arrive through Caddy on the edge network,
-      # and Caddy overwrites X-Forwarded-* from clients. So trust them — uvicorn for the
-      # scheme, the app for the per-IP limits (last X-Forwarded-For hop = real client).
+      # The app publishes no ports: requests only arrive through Caddy, the only other member
+      # of the planner-proxy network, and Caddy overwrites X-Forwarded-* from clients. So trust
+      # them — uvicorn for the scheme, the app for the per-IP limits (last X-Forwarded-For
+      # hop = real client).
       FORWARDED_ALLOW_IPS: "*"
       TRUST_PROXY: "true"
       # No public Swagger/OpenAPI in production.
@@ -117,12 +144,13 @@ services:
         target: db_password
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64m,mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     mem_limit: 300m
+    pids_limit: 256
     restart: unless-stopped
     logging:
       driver: json-file
@@ -131,7 +159,8 @@ services:
         max-file: "3"
     networks:
       backend: {}
-      edge:
+      egress: {}
+      planner-proxy:
         aliases:
           - planner-app
     depends_on:

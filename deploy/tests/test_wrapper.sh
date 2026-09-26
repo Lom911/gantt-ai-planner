@@ -65,6 +65,22 @@ run_case "valid short sha tag" \
 run_case "valid full-length sha tag" \
     "sha-0123456789abcdef0123456789abcdef01234567" 0 \
     "sudo /usr/local/bin/planner-deploy sha-0123456789abcdef0123456789abcdef01234567"
+digest="sha256:$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+run_case "valid short sha tag pinned by digest" \
+    "sha-abc1234@$digest" 0 "sudo /usr/local/bin/planner-deploy sha-abc1234@$digest"
+run_case "valid full-length sha tag pinned by digest" \
+    "sha-0123456789abcdef0123456789abcdef01234567@$digest" 0 \
+    "sudo /usr/local/bin/planner-deploy sha-0123456789abcdef0123456789abcdef01234567@$digest"
+run_case "digest one hex digit short rejected" "sha-abc1234@${digest%?}" 1
+run_case "digest one hex digit long rejected" "sha-abc1234@${digest}0" 1
+run_case "uppercase digest rejected" "sha-abc1234@sha256:$(printf 'ABCDEF0123456789%.0s' 1 2 3 4)" 1
+run_case "sha512 digest rejected" "sha-abc1234@sha512:${digest#sha256:}" 1
+run_case "digest without algorithm rejected" "sha-abc1234@${digest#sha256:}" 1
+run_case "digest without a tag rejected" "$digest" 1
+run_case "bare @digest without a tag rejected" "@$digest" 1
+run_case "two digests rejected" "sha-abc1234@$digest@$digest" 1
+run_case "digest followed by an extra token rejected" "sha-abc1234@$digest extra" 1
+run_case "digest split off as a second token rejected" "sha-abc1234 @$digest" 1
 run_case "empty command rejected" "" 1
 run_case "wrong prefix rejected" "latest" 1
 run_case "hex too short rejected" "sha-abc12" 1
