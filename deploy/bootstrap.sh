@@ -94,10 +94,16 @@ step_compose_files() {
     install -m 0755 -o root -g root "$SCRIPT_DIR/initdb/10-roles.sh" "$APP_DIR/initdb/10-roles.sh"
 
     if [ ! -f "$APP_DIR/.env" ]; then
-        printf 'IMAGE_TAG=latest\nLLM_PROVIDER=openrouter\nLLM_MODEL=anthropic/claude-sonnet-5\n' > "$APP_DIR/.env"
+        # No IMAGE_TAG on purpose (no silent `latest`): compose.prod.yml refuses to run
+        # without one, and the first release sets an explicit sha tag by hand
+        # (docs/runbook.md section 1); planner-deploy maintains it from then on.
+        (umask 177 && printf '%s\n' \
+            '# IMAGE_TAG=sha-<commit>  <- added by the first manual deploy (docs/runbook.md section 1)' \
+            'LLM_PROVIDER=openrouter' \
+            'LLM_MODEL=anthropic/claude-sonnet-5' > "$APP_DIR/.env")
         chmod 0600 "$APP_DIR/.env"
         chown root:root "$APP_DIR/.env"
-        echo "    created $APP_DIR/.env with IMAGE_TAG=latest, LLM_PROVIDER=openrouter, LLM_MODEL=anthropic/claude-sonnet-5"
+        echo "    created $APP_DIR/.env with LLM_PROVIDER=openrouter, LLM_MODEL=anthropic/claude-sonnet-5 (no IMAGE_TAG yet)"
     else
         echo "    $APP_DIR/.env already exists, leaving it untouched"
     fi
@@ -121,9 +127,20 @@ step_secrets() {
     for name in db_app_password db_owner_password pg_superuser_password; do
         secret_file="$SECRETS_DIR/$name"
         if [ ! -f "$secret_file" ]; then
-            (umask 177 && openssl rand -base64 32 > "$secret_file")
-            chmod 0444 "$secret_file"
-            chown root:root "$secret_file"
+            # Generate into a temp file in the same directory and rename it into place
+            # only once it is complete and non-empty: a failed/killed openssl must never
+            # leave an empty secret file behind, which the next run would treat as
+            # existing and Postgres would then initialise the role with an empty password.
+            tmp_secret="$(mktemp "$SECRETS_DIR/.$name.XXXXXX")"
+            if (umask 177 && openssl rand -base64 32 > "$tmp_secret") && [ -s "$tmp_secret" ]; then
+                chmod 0444 "$tmp_secret"
+                chown root:root "$tmp_secret"
+                mv -f "$tmp_secret" "$secret_file"
+            else
+                rm -f "$tmp_secret"
+                echo "    FAILED to generate $secret_file (openssl rand), aborting" >&2
+                exit 1
+            fi
             echo "    generated $secret_file"
         else
             echo "    $secret_file already exists, leaving it untouched"
@@ -189,8 +206,13 @@ main() {
     echo "         $APP_DIR/.env) or $SECRETS_DIR/anthropic_api_key if using a real Anthropic key instead"
     echo "      2. add the CI deploy key to /home/$DEPLOY_USER/.ssh/authorized_keys (see step above)"
     echo "      3. point the gantt-ai-planner.duckdns.org A record at this host's IP"
-    echo "      4. run the first deploy manually: set IMAGE_TAG=sha-<commit> in $APP_DIR/.env, then"
-    echo "         cd $APP_DIR && docker compose -f compose.prod.yml up -d"
+    echo "      4. run the first deploy manually with an explicit tag (docs/runbook.md section 1):"
+    echo "         echo 'IMAGE_TAG=sha-<commit>' >> $APP_DIR/.env"
+    echo "         cd $APP_DIR && docker compose -f compose.prod.yml pull && docker compose -f compose.prod.yml up -d"
 }
 
-main "$@"
+# Run only when executed (`bash deploy/bootstrap.sh`), not when sourced:
+# deploy/tests/test_bootstrap_secrets.sh sources this file to test single steps.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

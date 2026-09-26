@@ -3,6 +3,10 @@
 #   docker compose -f compose.prod.yml up -d
 # from /opt/gantt-planner (so relative secrets:/ .env resolve correctly).
 #
+# IMAGE_TAG (in .env) names the app image: `sha-<hex>`, or `sha-<hex>@sha256:<digest>`
+# as written by planner-deploy for CD releases. There is deliberately no default
+# (no silent `latest`): without it every compose command fails fast.
+#
 # Networks:
 #   - edge: external, shared with the host's Caddy reverse-proxy stack
 #     (/opt/caddy). Created once by deploy/bootstrap.sh.
@@ -59,7 +63,7 @@ services:
       start_period: 10s
 
   migrate:
-    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG}
+    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
     command: ["alembic", "upgrade", "head"]
     environment:
       DB_HOST: db
@@ -92,7 +96,7 @@ services:
         max-file: "3"
 
   app:
-    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG}
+    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
     environment:
       DB_HOST: db
       DB_PORT: "5432"
