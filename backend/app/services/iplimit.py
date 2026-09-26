@@ -56,7 +56,7 @@ class SlidingWindowLimiter:
         caller check a second limit before spending a hit on the first one."""
         hits = self._hits.get(key)
         if hits is None:
-            return False
+            return limit <= 0
         self._expire(hits, self._clock())
         return len(hits) >= limit
 

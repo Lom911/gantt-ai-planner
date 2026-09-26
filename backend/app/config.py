@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Per client IP (in-memory, sliding hour): new sessions and chat messages across sessions.
     session_limit_per_ip_hour: int = 20
     chat_limit_per_ip_hour: int = 60
+    # Sliding 24 h: without it a handful of addresses at the hourly cap could use up the whole
+    # app-wide chat_limit_per_day on their own.
+    chat_limit_per_ip_day: int = 150
     # Per client IP: plan mutations (operations/undo/redo/reset) and Excel imports. Each one
     # stores a full plan snapshot, so unbounded bursts from one client would grow the database.
     mutation_limit_per_ip_hour: int = 1200
