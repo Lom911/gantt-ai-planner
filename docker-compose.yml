@@ -29,6 +29,11 @@ services:
       # limits would be shared by all local e2e runs and demo recordings.
       SESSION_LIMIT_PER_IP_HOUR: "1000"
       CHAT_LIMIT_PER_IP_HOUR: "1000"
+      CHAT_LIMIT_PER_IP_DAY: "10000"
+      MUTATION_LIMIT_PER_IP_HOUR: "100000"
+      IMPORT_LIMIT_PER_IP_HOUR: "10000"
+      MCP_LIMIT_PER_IP_HOUR: "100000"
+      CHAT_LIMIT_PER_DAY: "100000"
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     depends_on:

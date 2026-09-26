@@ -93,6 +93,29 @@ async def get_version(
     )
 
 
+async def get_current_version_ref(
+    db: AsyncSession, session_id: uuid.UUID
+) -> tuple[int, int] | None:
+    """(version_no, plan_versions.id) of the session's current version, in one round trip.
+    The row id — never reused, unlike version_no after an undo + new edit — keys the
+    in-memory plan cache in PlanService."""
+    row = (
+        await db.execute(
+            select(PlanVersionRow.version_no, PlanVersionRow.id)
+            .join(SessionRow, SessionRow.id == PlanVersionRow.session_id)
+            .where(
+                SessionRow.id == session_id,
+                PlanVersionRow.version_no == SessionRow.current_version,
+            )
+        )
+    ).first()
+    return (row[0], row[1]) if row else None
+
+
+async def get_version_snapshot(db: AsyncSession, version_id: int) -> dict[str, Any] | None:
+    return await db.scalar(select(PlanVersionRow.snapshot).where(PlanVersionRow.id == version_id))
+
+
 async def list_version_meta(db: AsyncSession, session_id: uuid.UUID) -> list[VersionMeta]:
     rows = await db.execute(
         select(PlanVersionRow.version_no, PlanVersionRow.turn_id)

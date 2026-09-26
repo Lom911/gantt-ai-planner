@@ -1,8 +1,9 @@
 import asyncio
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,6 +35,11 @@ from app.services.locks import SessionLocks
 from app.services.sessions import hash_token, new_token
 
 Source = Literal["seed", "import", "user", "agent", "mcp", "reset"]
+# last_seen_at only drives the idle-session cleanup (days), so it is refreshed at most this
+# often instead of an UPDATE (and a WAL write) on every request.
+TOUCH_INTERVAL = timedelta(minutes=10)
+# Scheduled plans kept in memory, bounded by the size of their JSON snapshots.
+PLAN_CACHE_MAX_BYTES = 8_000_000
 MCP_WAIT_SECONDS = 10.0
 
 # Sources that REPLACE the whole plan rather than editing it in place. A task's history must
@@ -124,6 +130,13 @@ class PlanService:
         self._max_versions = max_versions
         self._max_plan_bytes = max_plan_bytes
         self._today = today
+        # plan_versions.id -> (plan, its schedule, snapshot bytes). Stored versions never change
+        # and their ids are never reused, so an entry can't go stale; it only saves re-reading,
+        # re-parsing and re-scheduling the current snapshot on every read (the load test's main
+        # per-request cost after DB round trips). Callers must not mutate the objects —
+        # apply_operations works on a deep copy.
+        self._plan_cache: OrderedDict[int, tuple[Plan, ScheduledPlan, int]] = OrderedDict()
+        self._plan_cache_bytes = 0
 
     async def create_session(self) -> tuple[str, uuid.UUID]:
         token = new_token()
@@ -148,7 +161,8 @@ class PlanService:
             row = await repo.get_session_by_token_hash(db, hash_token(token))
             if row is None:
                 return None
-            await repo.touch_session(db, row.id)
+            if row.last_seen_at < datetime.now(UTC) - TOUCH_INTERVAL:
+                await repo.touch_session(db, row.id)
             return row.id
 
     async def delete_session(self, session_id: uuid.UUID) -> None:
@@ -163,13 +177,40 @@ class PlanService:
 
     async def _load(self, db: AsyncSession, session_id: uuid.UUID) -> tuple[int, Plan]:
         """Current version number and its (unscheduled) plan."""
-        session = await repo.get_session(db, session_id)
-        if session is None:
-            raise NoSession()
-        version = await repo.get_version(db, session_id, session.current_version)
-        if version is None:
+        version, plan, _ = await self._load_scheduled(db, session_id)
+        return version, plan
+
+    async def _load_scheduled(
+        self, db: AsyncSession, session_id: uuid.UUID
+    ) -> tuple[int, Plan, ScheduledPlan]:
+        """Current version number, its plan and schedule — from the cache when possible."""
+        ref = await repo.get_current_version_ref(db, session_id)
+        if ref is None:
+            if await repo.get_session(db, session_id) is None:
+                raise NoSession()
             raise DomainError("Текущая версия плана не найдена")
-        return session.current_version, Plan.model_validate(version.snapshot)
+        version_no, version_id = ref
+        cached = self._plan_cache.get(version_id)
+        if cached is not None:
+            self._plan_cache.move_to_end(version_id)
+            return version_no, cached[0], cached[1]
+        snapshot = await repo.get_version_snapshot(db, version_id)
+        if snapshot is None:
+            raise DomainError("Текущая версия плана не найдена")
+        plan = Plan.model_validate(snapshot)
+        scheduled = schedule(plan)
+        self._cache_put(version_id, plan, scheduled)
+        return version_no, plan, scheduled
+
+    def _cache_put(self, version_id: int, plan: Plan, scheduled: ScheduledPlan) -> None:
+        size = plan_json_size(plan)
+        if size > PLAN_CACHE_MAX_BYTES // 4:
+            return  # one huge plan would evict everything else
+        self._plan_cache[version_id] = (plan, scheduled, size)
+        self._plan_cache_bytes += size
+        while self._plan_cache_bytes > PLAN_CACHE_MAX_BYTES:
+            _, (_, _, evicted) = self._plan_cache.popitem(last=False)
+            self._plan_cache_bytes -= evicted
 
     async def _build_state(
         self,
@@ -192,8 +233,8 @@ class PlanService:
         )
 
     async def _state(self, db: AsyncSession, session_id: uuid.UUID) -> PlanState:
-        version, plan = await self._load(db, session_id)
-        return await self._build_state(db, session_id, version, plan, schedule(plan))
+        version, plan, scheduled = await self._load_scheduled(db, session_id)
+        return await self._build_state(db, session_id, version, plan, scheduled)
 
     @staticmethod
     def _check_version(expected: int | None, current: int) -> None:
