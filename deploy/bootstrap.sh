@@ -9,7 +9,9 @@
 # Every step is safe to re-run and only echoes what it does. This script
 # NEVER touches any other service on the host, never opens/closes ports,
 # and never runs ufw - it only manages the 'deploy' user, the
-# /opt/gantt-planner and /opt/caddy stacks, and the backup cron job.
+# /opt/gantt-planner and /opt/caddy stacks, the Docker networks 'edge'
+# (Caddy <-> other sites) and 'planner-proxy' (internal, Caddy <-> app
+# only), and the backup cron job.
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
@@ -120,6 +122,13 @@ step_compose_files() {
             echo "    installed $CADDY_DIR/$file"
         fi
     done
+    # The app is reachable only over 'planner-proxy': a Caddy stack that predates it
+    # would lose the site as soon as the app is recreated.
+    if ! grep -q 'planner-proxy' "$CADDY_DIR/compose.yml"; then
+        echo "    ACTION NEEDED: $CADDY_DIR/compose.yml does not attach Caddy to 'planner-proxy'." >&2
+        echo "    Add it (see deploy/caddy/compose.yml and docs/runbook.md) and recreate Caddy" >&2
+        echo "    BEFORE recreating the app, or gantt-ai-planner.duckdns.org answers 502." >&2
+    fi
 }
 
 step_secrets() {
@@ -173,6 +182,22 @@ step_network() {
     else
         docker network create edge
         echo "    created network 'edge'"
+    fi
+
+    # Caddy <-> app only. --internal: no gateway, so nothing reaches the internet
+    # through it (the app has its own project-local `egress` network for that).
+    echo "==> Ensuring internal docker network 'planner-proxy' exists"
+    if docker network inspect planner-proxy >/dev/null 2>&1; then
+        if [ "$(docker network inspect -f '{{.Internal}}' planner-proxy)" = "true" ]; then
+            echo "    network 'planner-proxy' already exists (internal)"
+        else
+            echo "    network 'planner-proxy' exists but is NOT internal - recreate it with" >&2
+            echo "    'docker network create --internal planner-proxy' (detach caddy and app first)" >&2
+            exit 1
+        fi
+    else
+        docker network create --internal planner-proxy
+        echo "    created internal network 'planner-proxy'"
     fi
 }
 
