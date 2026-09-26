@@ -184,7 +184,10 @@ def ambiguous_api(s: EvalSession) -> str:
     expect_done(turn)
     after = s.plan()
     expect(after["version"] == before["version"], "план изменился, а запрос неоднозначный")
-    expect("?" in turn.reply, "ответ не уточняющий вопрос")
+    # A clarifying request may be phrased without «?» («Уточните, какую задачу…») — both count.
+    clarify = re.compile(r"\b(уточните|укажите|выберите|какую|какой|какие)\b")
+    asks = "?" in turn.reply or clarify.search(turn.reply.lower()) is not None
+    expect(asks, "ответ не уточняющий вопрос")
     return "план не менялся, задан уточняющий вопрос"
 
 
