@@ -33,7 +33,7 @@ from app.mcp_server.client import PlanToolClient
 from app.mcp_server.server import build_mcp
 from app.services.cleanup import run_cleanup_cycle
 from app.services.events import EventBus
-from app.services.iplimit import SlidingWindowLimiter
+from app.services.iplimit import SlidingWindowLimiter, client_key
 from app.services.locks import SessionLocks
 from app.services.plan_service import PlanService
 
@@ -65,19 +65,23 @@ async def _cleanup_loop(app: FastAPI, cfg: Settings) -> None:
 
 
 class McpOriginGate:
-    """Wraps the whole app: guards `/mcp` from cross-origin requests and dodges
-    fastmcp's 307 redirect (verified fact: `POST /mcp` w/o a trailing slash
-    redirects to `/mcp/`, which MCP HTTP clients don't reliably follow).
+    """Wraps the whole app: rate-limits `/mcp` per client IP, guards it from
+    cross-origin requests and dodges fastmcp's 307 redirect (verified fact:
+    `POST /mcp` w/o a trailing slash redirects to `/mcp/`, which MCP HTTP
+    clients don't reliably follow).
 
     Must be installed as raw ASGI middleware (not a route dependency) so it
     sees the original request path *before* Starlette's router/`Mount` gets
     to rewrite it, and runs before fastmcp's own auth middleware so a bad
-    Origin never even reaches the token check.
+    Origin — or a client over its limit — never even reaches the token check.
     """
 
-    def __init__(self, app: ASGIApp, *, public_origin: str) -> None:
+    def __init__(self, app: ASGIApp, *, settings: Settings) -> None:
         self._app = app
-        self._public_origin = public_origin
+        self._settings = settings
+        # Every request counts, authenticated or not (security audit L5): each bearer-token
+        # attempt costs a SELECT + UPDATE before fastmcp can accept or refuse it.
+        self._limiter = SlidingWindowLimiter(window_seconds=3600)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -87,12 +91,22 @@ class McpOriginGate:
         if path != "/mcp" and not path.startswith("/mcp/"):
             await self._app(scope, receive, send)
             return
-        origin = Headers(scope=scope).get("origin")
-        if origin is not None and origin != self._public_origin:
-            response = JSONResponse(
-                {"error": {"code": "bad_origin", "message": "Запрос с чужого источника отклонён"}},
-                status_code=403,
+        headers = Headers(scope=scope)
+        peer = scope.get("client")
+        key = client_key(
+            peer[0] if peer else None,
+            headers.get("x-forwarded-for"),
+            trust_proxy=self._settings.trust_proxy,
+        )
+        if not self._limiter.allow(key, self._settings.mcp_limit_per_ip_hour):
+            response = error_response(
+                "rate_limited", "Слишком много запросов к MCP с вашего адреса. Попробуйте позже."
             )
+            await response(scope, receive, send)
+            return
+        origin = headers.get("origin")
+        if origin is not None and origin != self._settings.public_origin:
+            response = error_response("bad_origin", "Запрос с чужого источника отклонён")
             await response(scope, receive, send)
             return
         if scope["path"] == "/mcp":
@@ -157,8 +171,9 @@ def create_app(
         openapi_url="/api/openapi.json" if cfg.api_docs else None,
         redoc_url=None,
     )
+    # The last one added is the outermost: the access log also records the gate's own 403/429.
+    app.add_middleware(McpOriginGate, settings=cfg)
     app.add_middleware(AccessLogMiddleware)
-    app.add_middleware(McpOriginGate, public_origin=cfg.public_origin)
     install_error_handlers(app)
     app.include_router(routes_session.router)
     app.include_router(routes_plan.router)

@@ -1,10 +1,10 @@
-import ipaddress
 import uuid
 
 from fastapi import Request, Response
 
 from app.config import Settings
 from app.services.errors import BadOrigin, NoSession, RateLimited
+from app.services.iplimit import client_key
 from app.services.plan_service import PlanService
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
@@ -55,30 +55,12 @@ async def require_session(request: Request) -> uuid.UUID:
 
 
 def client_ip(request: Request) -> str:
-    """Client address for per-IP limits. Behind a trusted proxy it is the LAST
-    X-Forwarded-For hop: Caddy appends the address that connected to it (and by default
-    drops forwarded headers from untrusted clients), while earlier hops are whatever the
-    client sent. Without trust_proxy the header is ignored and the TCP peer is used."""
-    if request.app.state.settings.trust_proxy:
-        hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",")]
-        hops = [h for h in hops if h]
-        if hops:
-            return _limit_key(hops[-1])
-    return _limit_key(request.client.host) if request.client else "unknown"
-
-
-def _limit_key(host: str) -> str:
-    """One limit bucket per IPv4 address, but per /64 for IPv6: a single IPv6 host usually
-    controls its whole /64, so per-address limits would be trivially bypassed."""
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return host
-    if isinstance(ip, ipaddress.IPv6Address):
-        if ip.ipv4_mapped is not None:
-            return str(ip.ipv4_mapped)
-        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
-    return host
+    """Client address for per-IP limits (trusted-proxy and IPv6 /64 rules: see client_key)."""
+    return client_key(
+        request.client.host if request.client else None,
+        request.headers.get("x-forwarded-for"),
+        trust_proxy=request.app.state.settings.trust_proxy,
+    )
 
 
 def limit_mutations(request: Request) -> None:

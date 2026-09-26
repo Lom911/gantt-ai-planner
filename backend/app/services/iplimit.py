@@ -5,9 +5,39 @@ worker (see README), and a limit that resets on restart is fine for its purpose 
 one client from creating sessions or burning the shared daily chat quota in bulk.
 """
 
+import ipaddress
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
+
+
+def client_key(peer: str | None, forwarded_for: str | None, *, trust_proxy: bool) -> str:
+    """Limit bucket of a client: `peer` is the TCP peer address, `forwarded_for` the
+    X-Forwarded-For header. Behind a trusted proxy it is the LAST X-Forwarded-For hop: Caddy
+    appends the address that connected to it (and by default drops forwarded headers from
+    untrusted clients), while earlier hops are whatever the client sent. Without trust_proxy
+    the header is ignored and the TCP peer is used. Takes plain values rather than a Request
+    so the /mcp ASGI middleware can use it too."""
+    if trust_proxy:
+        hops = [h.strip() for h in (forwarded_for or "").split(",")]
+        hops = [h for h in hops if h]
+        if hops:
+            return _limit_key(hops[-1])
+    return _limit_key(peer) if peer is not None else "unknown"
+
+
+def _limit_key(host: str) -> str:
+    """One limit bucket per IPv4 address, but per /64 for IPv6: a single IPv6 host usually
+    controls its whole /64, so per-address limits would be trivially bypassed."""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return host
 
 
 class SlidingWindowLimiter:

@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # stores a full plan snapshot, so unbounded bursts from one client would grow the database.
     mutation_limit_per_ip_hour: int = 1200
     import_limit_per_ip_hour: int = 60
+    # Per client IP: every request to the external /mcp endpoint, authenticated or not (each
+    # bearer-token attempt costs a database lookup).
+    mcp_limit_per_ip_hour: int = 1200
     # Interactive API docs (/api/docs, /api/openapi.json): handy locally, off in production.
     api_docs: bool = True
     # Take the client IP from the last X-Forwarded-For hop (the one our reverse proxy set).

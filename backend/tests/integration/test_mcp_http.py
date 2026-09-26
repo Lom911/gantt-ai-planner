@@ -134,6 +134,44 @@ async def test_cross_origin_request_is_rejected_before_reaching_mcp(app, session
     assert r.json()["error"]["code"] == "bad_origin"
 
 
+async def _raw_mcp_post(app: Any, **headers: str) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as raw:
+        return await raw.post(
+            "/mcp",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                **headers,
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        )
+
+
+async def test_mcp_requests_are_limited_per_ip_authenticated_or_not(app):
+    # Security audit L5: every unauthenticated attempt costs a token lookup in the database.
+    app.state.settings.mcp_limit_per_ip_hour = 2
+    statuses = [(await _raw_mcp_post(app)).status_code for _ in range(2)]
+    assert statuses == [401, 401]
+    r = await _raw_mcp_post(app, Authorization="Bearer mcp_" + "x" * 43)
+    assert r.status_code == 429
+    assert r.json()["error"]["code"] == "rate_limited"
+    assert "MCP" in r.json()["error"]["message"]
+
+
+async def test_mcp_limit_uses_the_proxy_appended_address(app):
+    app.state.settings.mcp_limit_per_ip_hour = 1
+    app.state.settings.trust_proxy = True
+    assert (await _raw_mcp_post(app, **{"X-Forwarded-For": "203.0.113.1"})).status_code == 401
+    assert (await _raw_mcp_post(app, **{"X-Forwarded-For": "203.0.113.1"})).status_code == 429
+    assert (await _raw_mcp_post(app, **{"X-Forwarded-For": "203.0.113.2"})).status_code == 401
+
+
+async def test_mcp_limit_does_not_touch_other_paths(session_client, app):
+    app.state.settings.mcp_limit_per_ip_hour = 0
+    assert (await session_client.get("/api/plan")).status_code == 200
+
+
 async def test_mcp_token_requires_a_session(client):
     r = await client.post("/api/mcp-token")
     assert r.status_code == 401
