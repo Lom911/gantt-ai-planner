@@ -80,6 +80,11 @@ def limit_imports(request: Request) -> None:
 
 
 def check_origin(request: Request) -> None:
+    if request.method not in UNSAFE:
+        return
     origin = request.headers.get("origin")
-    if request.method in UNSAFE and origin and origin != request.app.state.settings.public_origin:
+    # Fetch metadata as a second signal: a browser marks a request from another site as
+    # `Sec-Fetch-Site: cross-site` even where it omits the Origin header.
+    cross_site = request.headers.get("sec-fetch-site") == "cross-site"
+    if (origin and origin != request.app.state.settings.public_origin) or cross_site:
         raise BadOrigin("Запрос с чужого источника отклонён")

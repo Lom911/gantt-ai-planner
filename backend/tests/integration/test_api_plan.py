@@ -66,6 +66,18 @@ async def test_bad_origin_rejected(session_client):
     assert r.status_code == 403 and r.json()["error"]["code"] == "bad_origin"
 
 
+async def test_cross_site_fetch_metadata_rejected_even_without_origin(session_client):
+    r = await session_client.post("/api/plan/reset", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "bad_origin"
+    assert (await session_client.get("/api/plan")).json()["version"] == 1
+    # Reads stay allowed, and same-origin / user-initiated ("none") writes pass.
+    r = await session_client.get("/api/plan", headers={"Sec-Fetch-Site": "cross-site"})
+    assert r.status_code == 200
+    for site in ("same-origin", "none"):
+        r = await session_client.post("/api/plan/reset", headers={"Sec-Fetch-Site": site})
+        assert r.status_code == 200, site
+
+
 async def test_reset_and_delete_session(session_client):
     await session_client.post(
         "/api/plan/operations", json={"ops": [{"op": "delete_task", "id": 1}]}
