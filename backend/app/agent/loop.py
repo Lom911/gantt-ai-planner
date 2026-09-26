@@ -2,10 +2,11 @@ import asyncio
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import aclosing, suppress
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from app.agent.llm import LLM, Completed, LLMError, LLMTurnResult, TextDelta
+from app.agent.llm import LLM, Completed, LLMError, LLMTurnResult, LLMUsage, TextDelta
 from app.agent.prompt import build_system
 from app.db import repo
 from app.db.models import ChatMessageRow
@@ -19,10 +20,23 @@ MUTATING_TOOLS = {"apply_operations", "undo"}
 # (security audit M1): a normal turn is find → apply → answer, and the full plan is already in
 # the system prompt, so a huge tool result (get_plan on 500 tasks) is cut instead of re-sent.
 MAX_TOOL_RESULT_CHARS = 20_000
+# The third knob: real billed tokens, summed over the turn's LLM calls (see TurnStats).
+DEFAULT_TURN_TOKEN_BUDGET = 300_000
 
 
 class TooManySteps(Exception):
     pass
+
+
+class TurnBudgetExceeded(Exception):
+    pass
+
+
+@dataclass
+class TurnStats:
+    """What one turn has cost so far, filled in by `_loop`."""
+
+    usage: LLMUsage = field(default_factory=LLMUsage)
 
 
 class Agent:
@@ -36,6 +50,7 @@ class Agent:
         history_limit: int = 20,
         max_iterations: int = 8,
         turn_timeout: float = 180.0,
+        turn_token_budget: int = DEFAULT_TURN_TOKEN_BUDGET,
     ) -> None:
         self._llm = llm
         self._tools = tools
@@ -44,6 +59,7 @@ class Agent:
         self._history_limit = history_limit
         self._max_iterations = max_iterations
         self._timeout = turn_timeout
+        self._turn_token_budget = turn_token_budget
 
     async def run_turn(
         self, session_id: uuid.UUID, user_text: str, *, turn_id: uuid.UUID | None = None
@@ -76,10 +92,11 @@ class Agent:
                     history = await repo.recent_chat_messages(db, session_id, self._history_limit)
                 start = await service.get_state(session_id)
                 text_parts: list[str] = []
+                stats = TurnStats()
                 failure: dict[str, Any] | None = None
                 try:
                     async with aclosing(
-                        self._bounded(session_id, turn_id, start, history, text_parts)
+                        self._bounded(session_id, turn_id, start, history, text_parts, stats)
                     ) as bounded:
                         async for event in bounded:
                             yield event
@@ -92,6 +109,12 @@ class Agent:
                         "message": (
                             "Слишком много шагов за один запрос, попробуйте разбить его на части"
                         ),
+                    }
+                except TurnBudgetExceeded:
+                    failure = {
+                        "type": "error",
+                        "code": "turn_budget_exceeded",
+                        "message": "Ход слишком большой для одного запроса — сузьте его",
                     }
                 except TimeoutError:
                     failure = {
@@ -145,6 +168,7 @@ class Agent:
         start: PlanState,
         history: list[ChatMessageRow],
         text_parts: list[str],
+        stats: TurnStats,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Runs `_loop` in a background task and forwards its events, bounding the whole
         turn to `self._timeout` seconds via a wall-clock deadline.
@@ -162,7 +186,9 @@ class Agent:
 
         async def pump() -> None:
             try:
-                async for event in self._loop(session_id, turn_id, start, history, text_parts):
+                async for event in self._loop(
+                    session_id, turn_id, start, history, text_parts, stats
+                ):
                     await queue.put(event)
             except Exception as exc:  # forwarded to the consumer below, not swallowed
                 await queue.put(exc)
@@ -196,6 +222,7 @@ class Agent:
         start: PlanState,
         history: list[ChatMessageRow],
         text_parts: list[str],
+        stats: TurnStats,
     ) -> AsyncIterator[dict[str, Any]]:
         system = build_system(render_plan_table(start.scheduled, self._today()))
         messages = to_llm_messages(history)
@@ -217,9 +244,15 @@ class Agent:
                     result = ev.result
             if result is None:
                 raise LLMError("llm_unavailable", "Пустой ответ LLM")
+            stats.usage += result.usage
             messages.append({"role": "assistant", "content": result.content})
             if not result.tool_calls:
                 return
+            if stats.usage.total > self._turn_token_budget:
+                # Checked only before acting on tool calls: a final answer is kept whatever it
+                # cost, but an over-budget turn neither runs its tools (a half-done edit behind
+                # an error message) nor pays for yet another round trip.
+                raise TurnBudgetExceeded()
             tool_results: list[dict[str, Any]] = []
             for call in result.tool_calls:
                 yield {"type": "tool_started", "name": call.name}

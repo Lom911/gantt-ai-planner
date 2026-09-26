@@ -1,6 +1,13 @@
 from datetime import date
 
-from app.agent.llm import Completed, LLMError, LLMToolCall, LLMTurnResult, TextDelta
+from app.agent.llm import (
+    Completed,
+    LLMError,
+    LLMToolCall,
+    LLMTurnResult,
+    LLMUsage,
+    TextDelta,
+)
 from app.agent.loop import Agent
 from app.db import repo
 from app.domain.calendar import add_workdays
@@ -219,3 +226,86 @@ async def test_large_tool_results_are_truncated_before_going_back_to_the_llm(app
         loop_module.MAX_TOOL_RESULT_CHARS = old
     assert seen and all(len(s) <= 300 + 200 for s in seen)
     assert "обрезан" in seen[0]
+
+
+def _tool_turn(call_id, name, args, usage=None):
+    return LLMTurnResult(
+        text="",
+        tool_calls=[LLMToolCall(id=call_id, name=name, input=args)],
+        stop_reason="tool_use",
+        content=[{"type": "tool_use", "id": call_id, "name": name, "input": args}],
+        usage=usage or LLMUsage(),
+    )
+
+
+def _final_turn(text, usage=None):
+    return LLMTurnResult(
+        text=text,
+        tool_calls=[],
+        stop_reason="end_turn",
+        content=[{"type": "text", "text": text}],
+        usage=usage or LLMUsage(),
+    )
+
+
+async def test_turn_stops_once_real_token_usage_is_over_the_budget(app):
+    # Security audit M1: the iteration cap alone doesn't bound the cost — one iteration on a big
+    # plan can be tens of thousands of tokens. Every billed kind counts, cache reads included.
+    per_call = LLMUsage(
+        input_tokens=50,
+        output_tokens=10,
+        cache_creation_input_tokens=20,
+        cache_read_input_tokens=20,
+    )
+    calls = []
+
+    class ReadsThenEdits:
+        async def stream(self, *, system, tools, messages):
+            calls.append(len(messages))
+            if len(calls) == 1:
+                yield Completed(_tool_turn("g1", "get_plan", {}, per_call))
+            else:
+                op = {"op": "update_task", "id": 1, "duration": 9}
+                args = {"operations": [op]}
+                yield Completed(_tool_turn("a1", "apply_operations", args, per_call))
+
+    sid = await new_sid(app)
+    # 2 calls = 200 tokens > 170; without the cache reads it would be 160 and pass.
+    agent = Agent(
+        ReadsThenEdits(),
+        app.state.tool_client,
+        app.state.service,
+        today=lambda: TODAY,
+        turn_token_budget=170,
+    )
+    events = await collect(agent, sid, "поменяй что-нибудь")
+    assert events[-1]["type"] == "error" and events[-1]["code"] == "turn_budget_exceeded"
+    assert "сузьте" in events[-1]["message"]
+    assert len(calls) == 2
+    # The over-budget call's tool calls are not executed.
+    assert [e["name"] for e in events if e["type"] == "tool_started"] == ["get_plan"]
+    assert (await app.state.service.get_state(sid)).version == 1
+    assert not app.state.service.locks.is_busy(sid)
+
+
+async def test_a_final_answer_over_the_budget_still_completes_the_turn(app):
+    class OneExpensiveAnswer:
+        async def stream(self, *, system, tools, messages):
+            yield TextDelta("Готово.")
+            yield Completed(_final_turn("Готово.", LLMUsage(input_tokens=10_000)))
+
+    sid = await new_sid(app)
+    agent = Agent(
+        OneExpensiveAnswer(),
+        app.state.tool_client,
+        app.state.service,
+        today=lambda: TODAY,
+        turn_token_budget=100,
+    )
+    events = await collect(agent, sid, "привет")
+    assert events[-1]["type"] == "done"
+
+
+async def test_turn_token_budget_comes_from_settings(app):
+    assert app.state.settings.llm_turn_token_budget == 300_000
+    assert app.state.agent._turn_token_budget == app.state.settings.llm_turn_token_budget

@@ -158,7 +158,13 @@ def create_app(
         try:
             async with PlanToolClient(mcp) as tool_client:
                 app.state.tool_client = tool_client
-                app.state.agent = Agent(make_llm(cfg), tool_client, service, today=today_fn)
+                app.state.agent = Agent(
+                    make_llm(cfg),
+                    tool_client,
+                    service,
+                    today=today_fn,
+                    turn_token_budget=cfg.llm_turn_token_budget,
+                )
                 yield
         finally:
             cleanup_task.cancel()
