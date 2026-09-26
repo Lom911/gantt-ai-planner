@@ -278,6 +278,7 @@ class PlanService:
         check_batch_size(ops)  # before confirmation: an oversized batch fails however confirmed
         await self._guard_busy(session_id, source)
         async with self.locks.lock(session_id), self.sessionmaker() as db, db.begin():
+            await repo.lock_session_plan(db, session_id)
             version, plan = await self._load(db, session_id)
             self._check_version(expected_version, version)
             if not confirmed and requires_confirmation(plan, ops):
@@ -324,6 +325,7 @@ class PlanService:
     ) -> PlanState:
         await self._guard_busy(session_id, source)
         async with self.locks.lock(session_id), self.sessionmaker() as db, db.begin():
+            await repo.lock_session_plan(db, session_id)
             version, current = await self._load(db, session_id)
             before, after = await asyncio.to_thread(lambda: (schedule(current), schedule(plan)))
             changes = diff_plans(before, after)
@@ -378,6 +380,7 @@ class PlanService:
     ) -> PlanState:
         await self._guard_busy(session_id, source)
         async with self.locks.lock(session_id), self.sessionmaker() as db, db.begin():
+            await repo.lock_session_plan(db, session_id)
             version, before_plan = await self._load(db, session_id)
             self._check_version(expected_version, version)
             target = target_fn(await repo.list_version_meta(db, session_id), version)

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ChatMessageRow, ChatUsageRow, McpTokenRow, PlanVersionRow, SessionRow
@@ -39,6 +39,18 @@ async def get_session(db: AsyncSession, session_id: uuid.UUID) -> SessionRow | N
 async def touch_session(db: AsyncSession, session_id: uuid.UUID) -> None:
     await db.execute(
         update(SessionRow).where(SessionRow.id == session_id).values(last_seen_at=func.now())
+    )
+
+
+async def lock_session_plan(db: AsyncSession, session_id: uuid.UUID) -> None:
+    """Serializes the transactions that change one session's plan (apply, undo/redo, import,
+    reset) in the database itself, not just in the process (SessionLocks): with a second
+    worker, two of them could both read version N and write N+1 — a unique violation or a
+    lost update. Transaction-scoped: released on commit or rollback. Must be the first
+    statement of the transaction, so everything it reads afterwards is already the other
+    writer's committed result."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:sid, 0))"), {"sid": str(session_id)}
     )
 
 

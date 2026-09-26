@@ -185,6 +185,58 @@ async def test_mutation_or_import_over_the_plan_size_cap_is_rejected(sessionmake
     assert queue.empty()  # nothing stored, nothing announced
 
 
+def _worker(sessionmaker):
+    # A second uvicorn worker = its own PlanService with its own in-process SessionLocks: only
+    # the database can serialize it with the others.
+    return PlanService(sessionmaker, EventBus(), SessionLocks(), today=lambda: TODAY)
+
+
+async def _warm_pool(sessionmaker):
+    """Two pooled connections ready, so neither racer is delayed by opening one (which lets
+    the other finish first and hides the race)."""
+    from sqlalchemy import text
+
+    dbs = [sessionmaker(), sessionmaker()]
+    await asyncio.gather(*(db.execute(text("SELECT 1")) for db in dbs))
+    for db in dbs:
+        await db.close()
+
+
+async def test_concurrent_applies_from_two_workers_get_consecutive_versions(sessionmaker):
+    a, b = _worker(sessionmaker), _worker(sessionmaker)
+    _, sid = await a.create_session()
+    await _warm_pool(sessionmaker)
+    out_a, out_b = await asyncio.gather(
+        a.apply(sid, ops({"op": "update_task", "id": 1, "duration": 5}), source="user"),
+        b.apply(sid, ops({"op": "update_task", "id": 2, "duration": 6}), source="user"),
+    )
+    assert sorted([out_a.state.version, out_b.state.version]) == [2, 3]
+    state = await a.get_state(sid)
+    assert state.version == 3
+    # No lost update: the later batch was applied on top of the earlier one.
+    assert state.plan.tasks[0].duration == 5 and state.plan.tasks[1].duration == 6
+
+
+async def test_concurrent_undo_and_apply_from_two_workers_do_not_interleave(sessionmaker):
+    a, b = _worker(sessionmaker), _worker(sessionmaker)
+    _, sid = await a.create_session()
+    await a.apply(sid, ops({"op": "update_task", "id": 1, "duration": 5}), source="user")
+    await _warm_pool(sessionmaker)
+    await asyncio.gather(
+        a.undo(sid),
+        b.apply(sid, ops({"op": "update_task", "id": 2, "duration": 6}), source="user"),
+    )
+    state = await a.get_state(sid)
+    # Either order is fine, but each step must have seen the other's committed result.
+    if state.plan.tasks[1].duration == 6:  # undo first (-> v1), then apply (-> v2)
+        assert state.version == 2 and state.plan.tasks[0].duration == 3
+    else:  # apply first (-> v3), then undo (-> v2)
+        assert state.version == 2 and state.plan.tasks[0].duration == 5
+    async with a.sessionmaker() as db:
+        meta = await repo.list_version_meta(db, sid)
+    assert [m.version_no for m in meta] == list(range(1, len(meta) + 1))
+
+
 async def test_delete_session_forgets_lock_and_bus_entries(service):
     _, sid = await service.create_session()
     service.bus.subscribe(sid)
