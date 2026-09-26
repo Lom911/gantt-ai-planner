@@ -9,6 +9,7 @@ import { interpretBarChange, linkDeletionToOperation, linkToOperation } from "./
 import { RuLocale } from "./locale";
 import type { Operation, ScheduledPlan } from "@/api/types";
 import { formatRu, addDays, parseISODate } from "@/lib/dates";
+import { loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layoutPrefs";
 
 const TASK_TYPES = [
   { id: "task", label: "Задача" },
@@ -129,23 +130,32 @@ export function GanttView(props: {
   // A compact «Начало» (дд.мм) is back: without any date the grid couldn't answer "when does
   // this start / where is the plan counted from" — full dates stay on the bar's tooltip and in
   // the task modal. On a narrow pane, only №+Задача fit; the rest would squeeze the timeline.
-  const columns = useMemo(
-    () =>
-      narrow
-        ? [
-            { id: "id", header: "№", width: 40, align: "center" as const },
-            { id: "text", header: "Задача", width: 140, flexgrow: 1 },
-          ]
-        : [
-            { id: "id", header: "№", width: 44, align: "center" as const },
-            { id: "text", header: "Задача", width: 180, flexgrow: 1 },
-            { id: "assignee", header: "Исполнитель", width: 130 },
-            { id: "startLabel", header: "Начало", width: 76, align: "center" as const },
-            { id: "workDays", header: "Дн.", width: 48, align: "center" as const },
-          ],
-    [narrow],
+  // Column widths and the grid/timeline divider the user dragged last time (desktop layout only;
+  // the narrow phone layout always uses its fixed widths). Read once per mount.
+  const [prefs] = useState(loadLayoutPrefs);
+  const columns = useMemo(() => {
+    const w = (id: string, fallback: number) => prefs.columns?.[id] ?? fallback;
+    return narrow
+      ? [
+          { id: "id", header: "№", width: 40, align: "center" as const },
+          { id: "text", header: "Задача", width: 140, flexgrow: 1 },
+        ]
+      : [
+          { id: "id", header: "№", width: w("id", 44), align: "center" as const },
+          { id: "text", header: "Задача", width: w("text", 180), flexgrow: 1 },
+          { id: "assignee", header: "Исполнитель", width: w("assignee", 130) },
+          { id: "startLabel", header: "Начало", width: w("startLabel", 76), align: "center" as const },
+          { id: "workDays", header: "Дн.", width: w("workDays", 48), align: "center" as const },
+        ];
+  }, [narrow, prefs]);
+  const gridWidth = useMemo(
+    () => (!narrow && prefs.gridWidth) || columns.reduce((sum, c) => sum + c.width, 0),
+    [columns, narrow, prefs],
   );
-  const gridWidth = useMemo(() => columns.reduce((sum, c) => sum + c.width, 0), [columns]);
+  const narrowRef = useRef(narrow);
+  useEffect(() => {
+    narrowRef.current = narrow;
+  }, [narrow]);
 
   const init = useCallback((api: IApi) => {
     setApi(api);
@@ -157,6 +167,18 @@ export function GanttView(props: {
     // a desktop-width chart the "today" line is on this first screen too.
     const { plan } = handlers.current;
     api.exec("scroll-chart", { date: addDays(parseISODate(plan.project_start), -1) });
+
+    // Remember what the user resizes by hand (see layoutPrefs); the phone layout isn't saved.
+    api.on("resize-grid", ({ width }: { width: number }) => {
+      if (!narrowRef.current && width > 0) saveLayoutPrefs({ gridWidth: Math.round(width) });
+    });
+    api.on("set-columns", ({ columns: cols }: { columns: { id?: string; width?: number }[] }) => {
+      if (narrowRef.current) return;
+      const widths = Object.fromEntries(
+        cols.filter((c) => c.id && typeof c.width === "number").map((c) => [c.id!, Math.round(c.width!)]),
+      );
+      saveLayoutPrefs({ columns: widths });
+    });
 
     // `select-task` also fires on keyboard grid navigation, so opening the task modal from it
     // would pop the modal while the user is just arrowing through rows. Instead, a real pointer

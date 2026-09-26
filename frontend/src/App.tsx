@@ -10,6 +10,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { SplitLayout } from "@/components/SplitLayout";
 import { GanttView } from "@/components/gantt/GanttView";
 import { GanttLegend } from "@/components/gantt/GanttLegend";
+import { loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layoutPrefs";
 import { ProjectDates } from "@/components/gantt/ProjectDates";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { Toolbar } from "@/components/Toolbar";
@@ -22,7 +23,11 @@ function App() {
   const queryClient = useQueryClient();
   const { data, isLoading, isError, error } = usePlan();
   const { theme, isDark, setTheme } = useTheme();
-  const [zoom, setZoom] = useState<Zoom>("day");
+  const [zoom, setZoom] = useState<Zoom>(() => loadLayoutPrefs().zoom ?? "day");
+  const changeZoom = (z: Zoom) => {
+    setZoom(z);
+    saveLayoutPrefs({ zoom: z });
+  };
   const [focusedIds, flashFocused] = useFlashHighlight();
   const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -76,7 +81,7 @@ function App() {
           plan={data}
           agentBusy={agentBusy}
           zoom={zoom}
-          onZoom={setZoom}
+          onZoom={changeZoom}
           onImport={() => setImportOpen(true)}
           theme={theme}
           onTheme={setTheme}

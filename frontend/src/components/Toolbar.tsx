@@ -9,6 +9,7 @@ import { useMeta } from "@/hooks/useMeta";
 import type { ThemeMode } from "@/hooks/useTheme";
 import { deleteMyData } from "@/lib/deleteMyData";
 import { cn } from "@/lib/utils";
+import { clearLayoutPrefs } from "@/lib/layoutPrefs";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { McpConnectDialog } from "@/components/McpConnectDialog";
 import {
@@ -196,6 +197,14 @@ export function Toolbar({
               ))}
             </DropdownMenuRadioGroup>
             <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => {
+                clearLayoutPrefs();
+                location.reload();
+              }}
+            >
+              Сбросить раскладку
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setDeleteOpen(true)}>Удалить мои данные</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
