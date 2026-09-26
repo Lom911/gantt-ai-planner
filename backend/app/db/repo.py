@@ -225,6 +225,16 @@ async def get_active_mcp_token(
     )
 
 
+async def latest_mcp_token(db: AsyncSession, session_id: uuid.UUID) -> McpTokenRow | None:
+    """The session's newest non-revoked token, expired or not (issuing one revokes the rest)."""
+    return await db.scalar(
+        select(McpTokenRow)
+        .where(McpTokenRow.session_id == session_id, McpTokenRow.revoked_at.is_(None))
+        .order_by(McpTokenRow.created_at.desc())
+        .limit(1)
+    )
+
+
 async def revoke_mcp_tokens(db: AsyncSession, session_id: uuid.UUID, now: datetime) -> None:
     await db.execute(
         update(McpTokenRow)

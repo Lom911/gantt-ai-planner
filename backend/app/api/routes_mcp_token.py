@@ -1,5 +1,5 @@
 """«Подключить MCP» (spec §8): issue/revoke a per-session bearer token for the
-external `/mcp` Streamable HTTP endpoint."""
+external `/mcp` Streamable HTTP endpoint, and report whether one is active."""
 
 import secrets
 import uuid
@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Request
 
 from app.api.deps import check_origin, get_service, require_session
-from app.api.schemas import McpTokenResponse
+from app.api.schemas import McpTokenResponse, McpTokenStatus
 from app.db import repo
 from app.mcp_server.auth import TOKEN_PREFIX
 from app.services.sessions import hash_token
@@ -16,6 +16,23 @@ from app.services.sessions import hash_token
 router = APIRouter(prefix="/api/mcp-token", tags=["mcp"])
 
 TOKEN_TTL_DAYS = 7
+
+
+@router.get("")
+async def mcp_token_status(
+    request: Request, session_id: uuid.UUID = Depends(require_session)
+) -> McpTokenStatus:
+    async with get_service(request).sessionmaker() as db:
+        row = await repo.latest_mcp_token(db, session_id)
+    if row is None:
+        return McpTokenStatus(active=False)
+    return McpTokenStatus(
+        active=row.expires_at > datetime.now(UTC),
+        prefix=row.prefix,
+        created_at=row.created_at,
+        expires_at=row.expires_at,
+        last_used_at=row.last_used_at,
+    )
 
 
 @router.post("", dependencies=[Depends(check_origin)])

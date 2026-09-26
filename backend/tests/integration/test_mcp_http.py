@@ -175,6 +175,41 @@ async def test_mcp_limit_does_not_touch_other_paths(session_client, app):
 async def test_mcp_token_requires_a_session(client):
     r = await client.post("/api/mcp-token")
     assert r.status_code == 401
+    assert (await client.get("/api/mcp-token")).status_code == 401
+
+
+NO_TOKEN = {
+    "active": False,
+    "prefix": None,
+    "created_at": None,
+    "expires_at": None,
+    "last_used_at": None,
+}
+
+
+async def test_mcp_token_status_shows_activity_but_never_the_token(app, session_client):
+    assert (await session_client.get("/api/mcp-token")).json() == NO_TOKEN
+    token = await _issue_token(session_client)
+    body = (await session_client.get("/api/mcp-token")).json()
+    assert body["active"] is True
+    assert body["prefix"] == token[:12] and token not in str(body)
+    assert body["created_at"] and body["expires_at"] and body["last_used_at"] is None
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    assert (await session_client.get("/api/mcp-token")).json()["last_used_at"] is not None
+    assert (await session_client.delete("/api/mcp-token")).status_code == 204
+    assert (await session_client.get("/api/mcp-token")).json() == NO_TOKEN
+
+
+async def test_expired_mcp_token_is_reported_inactive(app, session_client):
+    from sqlalchemy import text
+
+    token = await _issue_token(session_client)
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE mcp_tokens SET expires_at = now() - interval '1 minute'"))
+    body = (await session_client.get("/api/mcp-token")).json()
+    assert body["active"] is False
+    assert body["prefix"] == token[:12] and body["expires_at"]
 
 
 async def test_bare_post_mcp_without_trailing_slash_returns_200_not_307(app, session_client):
