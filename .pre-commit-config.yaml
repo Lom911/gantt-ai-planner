@@ -1,11 +1,13 @@
+# Hooks are pinned by full commit SHA (tags are mutable); the comment names the
+# tag it was resolved from (`git ls-remote <repo> refs/tags/<tag>`).
 repos:
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.30.1
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1
     hooks:
       - id: gitleaks
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.9
+    rev: a56c0b927e6465d37cae3e97d35d4d18ab2b96cd  # v0.16.9
     hooks:
       - id: ruff
         args: [--fix]

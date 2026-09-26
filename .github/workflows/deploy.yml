@@ -69,7 +69,9 @@ jobs:
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
-          severity: CRITICAL
+          # Block on HIGH too, but only when a fixed version exists (ignore-unfixed): an
+          # unfixable base-image CVE would otherwise block every deploy with nothing to do.
+          severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
 
@@ -113,7 +115,11 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
+          # BatchMode: never fall back to an interactive prompt; IdentitiesOnly: offer only
+          # the deploy key, never whatever else an agent on the runner might hold.
           ssh -i "$key_file" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
             -o UserKnownHostsFile="$known_hosts_file" \
             -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" "$TAG"
