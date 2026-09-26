@@ -130,7 +130,12 @@ def create_app(
         sm = make_sessionmaker(engine)
 
     service = PlanService(
-        sm, EventBus(), SessionLocks(), max_versions=cfg.max_versions, today=today_fn
+        sm,
+        EventBus(),
+        SessionLocks(),
+        max_versions=cfg.max_versions,
+        max_plan_bytes=cfg.max_plan_json_bytes,
+        today=today_fn,
     )
     verifier = SessionTokenVerifier(sm)
     mcp = build_mcp(service, today=today_fn, auth=verifier)

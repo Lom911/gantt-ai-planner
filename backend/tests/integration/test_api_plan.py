@@ -1,8 +1,11 @@
+from datetime import date
 from io import BytesIO
 
+import httpx
 from openpyxl import Workbook
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+TODAY = date(2026, 9, 25)
 
 
 async def test_session_cookie_and_plan(client):
@@ -59,6 +62,26 @@ async def test_oversized_batch_is_rejected_with_russian_message(session_client):
     err = r.json()["error"]
     assert err["code"] == "invalid_operation" and "не больше 200 операций" in err["message"]
     assert (await session_client.get("/api/plan")).json()["version"] == 1
+
+
+async def test_plan_size_cap_comes_from_settings_and_answers_413(settings, sessionmaker):
+    from asgi_lifespan import LifespanManager
+
+    from app.domain.seed import build_demo_plan
+    from app.main import create_app
+    from app.services.plan_service import plan_json_size
+
+    settings.max_plan_json_bytes = plan_json_size(build_demo_plan(TODAY)) + 300
+    application = create_app(settings, sessionmaker=sessionmaker, today=lambda: TODAY)
+    async with LifespanManager(application):
+        transport = httpx.ASGITransport(app=application)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+            await c.post("/api/session")
+            op = {"op": "update_task", "id": 1, "description": "я" * 300}
+            r = await c.post("/api/plan/operations", json={"ops": [op]})
+            assert r.status_code == 413
+            assert r.json()["error"]["code"] == "plan_too_large"
+            assert (await c.get("/api/plan")).json()["version"] == 1
 
 
 async def test_bad_origin_rejected(session_client):

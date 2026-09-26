@@ -151,6 +151,40 @@ async def test_versions_are_pruned(sessionmaker):
         await service.undo(sid)
 
 
+async def test_mutation_or_import_over_the_plan_size_cap_is_rejected(sessionmaker):
+    # Security audit M2: every version stores a full snapshot (up to max_versions of them).
+    from app.services.errors import PlanTooLarge
+    from app.services.plan_service import plan_json_size
+
+    demo_size = plan_json_size(build_demo_plan(TODAY))
+    service = PlanService(
+        sessionmaker,
+        EventBus(),
+        SessionLocks(),
+        max_plan_bytes=demo_size + 300,
+        today=lambda: TODAY,
+    )
+    _, sid = await service.create_session()
+    queue = service.bus.subscribe(sid)
+    out = await service.apply(
+        sid, ops({"op": "update_task", "id": 1, "description": "x" * 100}), source="user"
+    )
+    assert out.state.version == 2  # still under the cap
+    queue.get_nowait()
+    with pytest.raises(PlanTooLarge) as exc:
+        await service.apply(
+            sid, ops({"op": "update_task", "id": 1, "description": "я" * 300}), source="agent"
+        )
+    assert exc.value.code == "plan_too_large" and "слишком большим" in exc.value.message
+    big = build_demo_plan(TODAY)
+    big.tasks[0].description = "я" * 300  # 600 bytes in UTF-8
+    with pytest.raises(PlanTooLarge):
+        await service.replace(sid, big, source="import", summary="Импорт")
+    state = await service.get_state(sid)
+    assert state.version == 2 and state.plan.tasks[0].description == "x" * 100
+    assert queue.empty()  # nothing stored, nothing announced
+
+
 async def test_delete_session_forgets_lock_and_bus_entries(service):
     _, sid = await service.create_session()
     service.bus.subscribe(sid)

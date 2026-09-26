@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     max_upload_mb: int = 2
     session_ttl_days: int = 14
     max_versions: int = 50
+    # Largest plan snapshot (compact UTF-8 JSON) a mutation or import may store; each session
+    # keeps up to max_versions of them.
+    max_plan_json_bytes: int = 1_500_000
     static_dir: str | None = None
     log_level: str = "INFO"
 

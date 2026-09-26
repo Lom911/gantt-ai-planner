@@ -26,6 +26,7 @@ from app.services.errors import (
     NotFound,
     NothingToRedo,
     NothingToUndo,
+    PlanTooLarge,
     VersionConflict,
 )
 from app.services.events import EventBus
@@ -76,6 +77,11 @@ def apply_summary(changes: list[Change], before_start: date, after_start: date) 
     return f"{summarize_changes(changes)}; {note}"
 
 
+def plan_json_size(plan: Plan) -> int:
+    """Bytes of the plan as compact UTF-8 JSON: what `max_plan_bytes` limits per snapshot."""
+    return len(plan.model_dump_json().encode())
+
+
 def _index(meta: list[VersionMeta], current: int) -> int:
     return next(i for i, m in enumerate(meta) if m.version_no == current)
 
@@ -109,12 +115,14 @@ class PlanService:
         locks: SessionLocks,
         *,
         max_versions: int = 50,
+        max_plan_bytes: int = 1_500_000,
         today: Callable[[], date] = date.today,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.bus = bus
         self.locks = locks
         self._max_versions = max_versions
+        self._max_plan_bytes = max_plan_bytes
         self._today = today
 
     async def create_session(self) -> tuple[str, uuid.UUID]:
@@ -396,6 +404,11 @@ class PlanService:
         summary: str,
         diff: list[dict[str, Any]],
     ) -> None:
+        # Every stored version is a full snapshot (up to max_versions per session), and the
+        # model's per-field caps alone still allow ~2.5 MB on a 500-task plan (security audit
+        # M2). Checked here, the one place every mutation and import stores a version through.
+        if plan_json_size(plan) > self._max_plan_bytes:
+            raise PlanTooLarge(self._max_plan_bytes)
         await repo.delete_versions_after(db, session_id, current_version)
         new_version = current_version + 1
         await repo.add_version(
