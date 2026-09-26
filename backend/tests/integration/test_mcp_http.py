@@ -85,6 +85,22 @@ async def test_apply_operations_over_http_increments_version_and_publishes_mcp_e
     assert after.version == before.version + 1
 
 
+async def test_external_mcp_client_confirms_mass_delete_itself(app, session_client):
+    # The in-app agent's «only the user's own yes confirms» guard doesn't apply here: an
+    # external client is the user's own tool, its confirmed=true goes straight to the server.
+    token = await _issue_token(session_client)
+    ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
+    async with _mcp_client(app, token) as client:
+        refused = await client.call_tool(
+            "apply_operations", {"operations": ops}, raise_on_error=False
+        )
+        confirmed = await client.call_tool(
+            "apply_operations", {"operations": ops, "confirmed": True}
+        )
+    assert refused.is_error and "confirmation_required" in refused.content[0].text
+    assert not confirmed.is_error and confirmed.structured_content["version"] == 2
+
+
 async def test_bad_token_is_rejected(app, session_client):
     await _issue_token(session_client)  # a valid token exists, but we use a bogus one
     with pytest.raises(MCPError):  # fastmcp wraps the HTTP 401 as an MCPError
@@ -134,9 +150,82 @@ async def test_cross_origin_request_is_rejected_before_reaching_mcp(app, session
     assert r.json()["error"]["code"] == "bad_origin"
 
 
+async def _raw_mcp_post(app: Any, **headers: str) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as raw:
+        return await raw.post(
+            "/mcp",
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+                **headers,
+            },
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        )
+
+
+async def test_mcp_requests_are_limited_per_ip_authenticated_or_not(app):
+    # Security audit L5: every unauthenticated attempt costs a token lookup in the database.
+    app.state.settings.mcp_limit_per_ip_hour = 2
+    statuses = [(await _raw_mcp_post(app)).status_code for _ in range(2)]
+    assert statuses == [401, 401]
+    r = await _raw_mcp_post(app, Authorization="Bearer mcp_" + "x" * 43)
+    assert r.status_code == 429
+    assert r.json()["error"]["code"] == "rate_limited"
+    assert "MCP" in r.json()["error"]["message"]
+
+
+async def test_mcp_limit_uses_the_proxy_appended_address(app):
+    app.state.settings.mcp_limit_per_ip_hour = 1
+    app.state.settings.trust_proxy = True
+    assert (await _raw_mcp_post(app, **{"X-Forwarded-For": "203.0.113.1"})).status_code == 401
+    assert (await _raw_mcp_post(app, **{"X-Forwarded-For": "203.0.113.1"})).status_code == 429
+    assert (await _raw_mcp_post(app, **{"X-Forwarded-For": "203.0.113.2"})).status_code == 401
+
+
+async def test_mcp_limit_does_not_touch_other_paths(session_client, app):
+    app.state.settings.mcp_limit_per_ip_hour = 0
+    assert (await session_client.get("/api/plan")).status_code == 200
+
+
 async def test_mcp_token_requires_a_session(client):
     r = await client.post("/api/mcp-token")
     assert r.status_code == 401
+    assert (await client.get("/api/mcp-token")).status_code == 401
+
+
+NO_TOKEN = {
+    "active": False,
+    "prefix": None,
+    "created_at": None,
+    "expires_at": None,
+    "last_used_at": None,
+}
+
+
+async def test_mcp_token_status_shows_activity_but_never_the_token(app, session_client):
+    assert (await session_client.get("/api/mcp-token")).json() == NO_TOKEN
+    token = await _issue_token(session_client)
+    body = (await session_client.get("/api/mcp-token")).json()
+    assert body["active"] is True
+    assert body["prefix"] == token[:12] and token not in str(body)
+    assert body["created_at"] and body["expires_at"] and body["last_used_at"] is None
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    assert (await session_client.get("/api/mcp-token")).json()["last_used_at"] is not None
+    assert (await session_client.delete("/api/mcp-token")).status_code == 204
+    assert (await session_client.get("/api/mcp-token")).json() == NO_TOKEN
+
+
+async def test_expired_mcp_token_is_reported_inactive(app, session_client):
+    from sqlalchemy import text
+
+    token = await _issue_token(session_client)
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE mcp_tokens SET expires_at = now() - interval '1 minute'"))
+    body = (await session_client.get("/api/mcp-token")).json()
+    assert body["active"] is False
+    assert body["prefix"] == token[:12] and body["expires_at"]
 
 
 async def test_bare_post_mcp_without_trailing_slash_returns_200_not_307(app, session_client):

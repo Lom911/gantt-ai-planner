@@ -1,8 +1,9 @@
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -56,6 +57,19 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
+    # The migrate service connects as planner_owner, which (unlike planner_app) has no
+    # role-level timeouts: DDL queued behind a long transaction of the running app would wait
+    # forever, with every later app query on that table queued behind it. Session-level SETs,
+    # committed so they outlive this implicit transaction (alembic would otherwise treat it
+    # as an external one and never commit the migrations). The values in effect are logged.
+    connection.execute(text("SET lock_timeout = '10s'"))
+    connection.execute(text("SET statement_timeout = '5min'"))
+    logging.getLogger("alembic.env").info(
+        "migration session: lock_timeout=%s statement_timeout=%s",
+        connection.execute(text("SHOW lock_timeout")).scalar(),
+        connection.execute(text("SHOW statement_timeout")).scalar(),
+    )
+    connection.commit()
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():

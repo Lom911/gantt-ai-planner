@@ -1,6 +1,15 @@
+import logging
+import re
 from datetime import date
 
-from app.agent.llm import Completed, LLMError, LLMToolCall, LLMTurnResult, TextDelta
+from app.agent.llm import (
+    Completed,
+    LLMError,
+    LLMToolCall,
+    LLMTurnResult,
+    LLMUsage,
+    TextDelta,
+)
 from app.agent.loop import Agent
 from app.db import repo
 from app.domain.calendar import add_workdays
@@ -219,3 +228,193 @@ async def test_large_tool_results_are_truncated_before_going_back_to_the_llm(app
         loop_module.MAX_TOOL_RESULT_CHARS = old
     assert seen and all(len(s) <= 300 + 200 for s in seen)
     assert "обрезан" in seen[0]
+
+
+def _tool_turn(call_id, name, args, usage=None):
+    return LLMTurnResult(
+        text="",
+        tool_calls=[LLMToolCall(id=call_id, name=name, input=args)],
+        stop_reason="tool_use",
+        content=[{"type": "tool_use", "id": call_id, "name": name, "input": args}],
+        usage=usage or LLMUsage(),
+    )
+
+
+def _final_turn(text, usage=None):
+    return LLMTurnResult(
+        text=text,
+        tool_calls=[],
+        stop_reason="end_turn",
+        content=[{"type": "text", "text": text}],
+        usage=usage or LLMUsage(),
+    )
+
+
+async def test_turn_stops_once_real_token_usage_is_over_the_budget(app):
+    # Security audit M1: the iteration cap alone doesn't bound the cost — one iteration on a big
+    # plan can be tens of thousands of tokens. Every billed kind counts, cache reads included.
+    per_call = LLMUsage(
+        input_tokens=50,
+        output_tokens=10,
+        cache_creation_input_tokens=20,
+        cache_read_input_tokens=20,
+    )
+    calls = []
+
+    class ReadsThenEdits:
+        async def stream(self, *, system, tools, messages):
+            calls.append(len(messages))
+            if len(calls) == 1:
+                yield Completed(_tool_turn("g1", "get_plan", {}, per_call))
+            else:
+                op = {"op": "update_task", "id": 1, "duration": 9}
+                args = {"operations": [op]}
+                yield Completed(_tool_turn("a1", "apply_operations", args, per_call))
+
+    sid = await new_sid(app)
+    # 2 calls = 200 tokens > 170; without the cache reads it would be 160 and pass.
+    agent = Agent(
+        ReadsThenEdits(),
+        app.state.tool_client,
+        app.state.service,
+        today=lambda: TODAY,
+        turn_token_budget=170,
+    )
+    events = await collect(agent, sid, "поменяй что-нибудь")
+    assert events[-1]["type"] == "error" and events[-1]["code"] == "turn_budget_exceeded"
+    assert "сузьте" in events[-1]["message"]
+    assert len(calls) == 2
+    # The over-budget call's tool calls are not executed.
+    assert [e["name"] for e in events if e["type"] == "tool_started"] == ["get_plan"]
+    assert (await app.state.service.get_state(sid)).version == 1
+    assert not app.state.service.locks.is_busy(sid)
+
+
+async def test_a_final_answer_over_the_budget_still_completes_the_turn(app):
+    class OneExpensiveAnswer:
+        async def stream(self, *, system, tools, messages):
+            yield TextDelta("Готово.")
+            yield Completed(_final_turn("Готово.", LLMUsage(input_tokens=10_000)))
+
+    sid = await new_sid(app)
+    agent = Agent(
+        OneExpensiveAnswer(),
+        app.state.tool_client,
+        app.state.service,
+        today=lambda: TODAY,
+        turn_token_budget=100,
+    )
+    events = await collect(agent, sid, "привет")
+    assert events[-1]["type"] == "done"
+
+
+async def test_turn_token_budget_comes_from_settings(app):
+    assert app.state.settings.llm_turn_token_budget == 300_000
+    assert app.state.agent._turn_token_budget == app.state.settings.llm_turn_token_budget
+
+
+def _trace_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.name == "app.agent.trace"]
+
+
+async def test_each_turn_logs_one_trace_line_without_content(app, caplog):
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        events = await collect(app.state.agent, sid, "Сдвинь все задачи Дмитрия на 3 дня")
+    [line] = _trace_lines(caplog)
+    assert line.startswith("agent_turn ")
+    assert f"sid={str(sid)[:8]} " in line and str(sid) not in line
+    assert f"turn={events[-1]['turn_id']} " in line
+    assert " outcome=done " in line
+    assert " iterations=3 " in line
+    assert " tools=find_tasks,apply_operations " in line
+    assert " tokens_in=0 tokens_out=0 cache_write=0 cache_read=0 tokens_total=0 " in line
+    assert re.search(r" duration_ms=\d+$", line)
+    # No message text, no plan content (names, people), no address.
+    assert "Сдвин" not in line and "Дмитри" not in line and "127.0.0.1" not in line
+
+
+async def test_trace_line_sums_tokens_and_names_the_error(app, caplog):
+    class Looping:
+        async def stream(self, *, system, tools, messages):
+            usage = LLMUsage(input_tokens=100, output_tokens=5, cache_read_input_tokens=1000)
+            yield Completed(_tool_turn(f"x{len(messages)}", "get_plan", {}, usage))
+
+    sid = await new_sid(app)
+    agent = Agent(
+        Looping(), app.state.tool_client, app.state.service, today=lambda: TODAY, max_iterations=2
+    )
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        await collect(agent, sid, "зациклись")
+    [line] = _trace_lines(caplog)
+    assert " outcome=too_many_steps " in line and " iterations=2 " in line
+    assert " tools=get_plan,get_plan " in line
+    assert " tokens_in=200 tokens_out=10 cache_write=0 cache_read=2000 tokens_total=2210 " in line
+
+
+async def test_trace_line_is_logged_for_a_turn_without_tools(app, caplog):
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        await collect(app.state.agent, sid, "привет")
+    [line] = _trace_lines(caplog)
+    assert " outcome=done iterations=1 tools=- " in line
+
+
+class MassDeleter:
+    """A model talked into deleting tasks 1-6 with confirmed=true right away (security audit
+    L3: e.g. by an instruction hidden in a task description), then answering."""
+
+    def __init__(self):
+        self.tool_results = []
+
+    async def stream(self, *, system, tools, messages):
+        last = messages[-1]["content"]
+        if isinstance(last, list):
+            self.tool_results.append(last[0]["content"])
+            yield Completed(_final_turn("Подтвердите удаление задач 1–6."))
+        else:
+            ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
+            args = {"operations": ops, "confirmed": True}
+            yield Completed(_tool_turn(f"d{len(messages)}", "apply_operations", args))
+
+
+async def test_model_cannot_confirm_a_mass_delete_without_the_users_yes(app):
+    llm = MassDeleter()
+    agent = Agent(llm, app.state.tool_client, app.state.service, today=lambda: TODAY)
+    sid = await new_sid(app)
+    events = await collect(agent, sid, "Удали задачи 1, 2, 3, 4, 5, 6")
+    assert events[-1]["type"] == "done"
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [False]
+    # The server asked for confirmation again, and the model is told why its flag was dropped.
+    assert "confirmation_required" in llm.tool_results[0]
+    assert "подтверждения" in llm.tool_results[0]
+    state = await app.state.service.get_state(sid)
+    assert state.version == 1 and len(state.plan.tasks) == 25
+
+    events = await collect(agent, sid, "да нет, не надо")
+    assert len((await app.state.service.get_state(sid)).plan.tasks) == 25
+
+    events = await collect(agent, sid, "Да, удаляй")
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [True]
+    state = await app.state.service.get_state(sid)
+    assert state.version == 2 and len(state.plan.tasks) == 19
+
+
+async def test_confirmation_guard_is_counted_in_the_trace(app, caplog):
+    agent = Agent(MassDeleter(), app.state.tool_client, app.state.service, today=lambda: TODAY)
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        await collect(agent, sid, "Удали задачи 1, 2, 3, 4, 5, 6")
+    [line] = _trace_lines(caplog)
+    assert " confirm_blocked=1 " in line
+
+
+async def test_trace_line_is_logged_when_the_client_goes_away(app, caplog):
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        turn = app.state.agent.run_turn(sid, "Перенеси задачу 1 на 2 дня")
+        await anext(turn)
+        await turn.aclose()
+    [line] = _trace_lines(caplog)
+    assert " outcome=aborted " in line
+    assert not app.state.service.locks.is_busy(sid)

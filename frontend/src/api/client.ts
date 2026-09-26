@@ -4,6 +4,7 @@ import type {
   ImportFailure,
   ImportSuccess,
   McpTokenResponse,
+  McpTokenStatus,
   MetaResponse,
   Operation,
   PlanResponse,
@@ -111,6 +112,7 @@ export const api = {
   taskHistory: (id: number) => request<TaskHistoryEntry[]>(`/api/plan/tasks/${id}/history`),
   meta: () => request<MetaResponse>("/api/meta"),
   deleteSession: () => request<void>("/api/session", { method: "DELETE" }),
+  mcpTokenStatus: () => request<McpTokenStatus>("/api/mcp-token"),
   createMcpToken: () => post<McpTokenResponse>("/api/mcp-token"),
   revokeMcpToken: () => request<void>("/api/mcp-token", { method: "DELETE" }),
   async importPlan(file: File, projectStart: string): Promise<ImportSuccess | ImportFailure> {

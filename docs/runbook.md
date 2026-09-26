@@ -7,20 +7,34 @@
 Сервер общий с другими сервисами — ничего из описанного здесь не должно
 затрагивать их порты, сети или конфигурацию. Скрипты в `deploy/` тоже
 этого не делают: `deploy/bootstrap.sh` работает только с пользователем
-`deploy`, каталогами `/opt/gantt-planner`, `/opt/caddy`, сетью Docker
-`edge` и cron-задачей бэкапа.
+`deploy`, каталогами `/opt/gantt-planner`, `/opt/caddy`, сетями Docker
+`edge` и `planner-proxy` и cron-задачей бэкапа.
 
 ## Обзор стенда
 
 - `/opt/gantt-planner` — стек приложения (compose-проект `gantt-planner`):
-  `compose.prod.yml`, `.env` (только `IMAGE_TAG`), `secrets/` (0700,
-  файлы 0444), `initdb/10-roles.sh`.
+  `compose.prod.yml`, `.env` (`IMAGE_TAG`, `LLM_PROVIDER`, `LLM_MODEL`),
+  `secrets/` (0700, файлы 0444), `initdb/10-roles.sh`.
 - `/var/lib/gantt-planner/pg` — данные Postgres (bind-mount).
-- `/var/backups/gantt-planner` — дампы `pg_dump`, хранятся 7 дней.
-- `/opt/caddy` — общий reverse proxy (Caddy 2) в сети `edge`, обслуживает
+- `/var/backups/gantt-planner` — дампы `pg_dump`: ночные `<дата>.dump` и
+  снапшоты перед каждым деплоем `pre-deploy-<UTC>.dump`, те и другие
+  хранятся 7 дней.
+- `/var/lib/gantt-planner/backup-status` — итог последнего ночного бэкапа
+  (раздел 4).
+- `/opt/caddy` — общий reverse proxy (Caddy 2), обслуживает
   `gantt-ai-planner.duckdns.org` вместе с другими сайтами на этом хосте.
+- Сети Docker:
+  - `edge` (внешняя) — Caddy и upstream'ы других сайтов хоста; приложения
+    в ней нет;
+  - `planner-proxy` (внешняя, `--internal`, без выхода наружу) — только
+    Caddy и контейнер `app` (алиас `planner-app`); кроме Caddy, до
+    приложения не достучится ни один контейнер хоста;
+  - `gantt-planner_backend` (internal) — `app`/`migrate` ↔ `db`;
+  - `gantt-planner_egress` — отдельная сеть проекта, только у `app`:
+    исходящий HTTPS к API LLM (OpenRouter/Anthropic).
 - Образ приложения: `ghcr.io/alomaev-hue/gantt-ai-planner`, теги
-  `sha-<короткий-sha>` и `latest`.
+  `sha-<короткий-sha>` и `latest`; CD деплоит по неизменяемому digest
+  (`sha-<short>@sha256:<digest>`), а не по тегу.
 
 ## 1. Первичная настройка сервера
 
@@ -39,13 +53,25 @@
      (0700, root), `/var/lib/gantt-planner/pg` (владелец uid:gid 70:70,
      как у postgres в образе `postgres:17-alpine`), `/var/backups/gantt-planner`,
      `/opt/caddy`;
-   - копирует `compose.prod.yml`, `initdb/10-roles.sh`, конфиг Caddy;
+   - копирует `compose.prod.yml`, `initdb/10-roles.sh`, конфиг Caddy
+     (существующие `/opt/caddy/compose.yml` и `Caddyfile` не
+     перезаписывает — см. «Существующий стек Caddy» ниже);
+   - создаёт `/opt/gantt-planner/.env` (если его нет) с `LLM_PROVIDER` и
+     `LLM_MODEL`, **без `IMAGE_TAG`**: тег первого релиза задаётся явно в
+     п. 4, до этого `docker compose` для этого стека падает с
+     `required variable IMAGE_TAG is missing a value` — молчаливого
+     отката на `latest` больше нет;
    - генерирует `db_app_password`, `db_owner_password`,
      `pg_superuser_password` через `openssl rand -base64 32` — **только
-     если файлов ещё нет**, существующие пароли не трогает;
-   - создаёт пустой файл-заглушку `secrets/anthropic_api_key`, если его
-     нет;
-   - создаёт сеть Docker `edge`, если её нет;
+     если файлов ещё нет**, существующие пароли не трогает. Пароль пишется
+     во временный файл в том же каталоге и переименовывается на место
+     только если он непустой: упавший `openssl` не оставит пустой секрет,
+     который следующий запуск принял бы за готовый;
+   - создаёт пустые файлы-заглушки `secrets/anthropic_api_key` и
+     `secrets/openrouter_api_key`, если их нет;
+   - создаёт сеть Docker `edge` и внутреннюю сеть `planner-proxy`
+     (`docker network create --internal planner-proxy`), если их нет;
+     существующую `planner-proxy` без `--internal` не принимает;
    - поднимает стек Caddy (`docker compose up -d` в `/opt/caddy`);
    - устанавливает cron `/etc/cron.d/gantt-planner-backup` (03:15 каждый
      день).
@@ -93,10 +119,15 @@
      сервере не нужен, поддомен создаёт владелец);
    - убедиться, что порты 80/443 доступны из интернета (это единственная
      проверка сетевого доступа, которая нужна при первом деплое).
-4. Первый деплой — вручную, без CD:
+4. Первый деплой — вручную, без CD, с явным тегом (`planner-deploy` без
+   текущего `IMAGE_TAG` в `.env` отказывается работать — ему не на что
+   откатываться):
    ```bash
    cd /opt/gantt-planner
-   echo "IMAGE_TAG=sha-<commit>" > .env   # публичный тег из ghcr.io
+   # Дописать (>>, а не >: в .env уже лежат LLM_PROVIDER/LLM_MODEL).
+   # Тег — публичный sha-<commit> из ghcr.io; можно сразу с digest:
+   # sha-<commit>@sha256:<digest> (digest — в логе шага push workflow Deploy).
+   echo "IMAGE_TAG=sha-<commit>" >> .env
    docker compose -f compose.prod.yml pull
    docker compose -f compose.prod.yml up -d
    docker compose -f compose.prod.yml logs -f migrate app
@@ -104,59 +135,128 @@
    Проверить `https://gantt-ai-planner.duckdns.org/healthz` — должен
    отвечать `200`.
 
+### Существующий стек Caddy (общий с другими сайтами)
+
+`bootstrap.sh` никогда не перезаписывает `/opt/caddy/compose.yml` и
+`Caddyfile` (там могут быть другие сайты). Если стек Caddy появился
+раньше сети `planner-proxy`, bootstrap печатает `ACTION NEEDED`, и Caddy
+нужно подключить к ней руками — **до** пересоздания контейнера `app`
+(иначе сайт отвечает 502, пока Caddy не увидит приложение):
+
+```yaml
+# /opt/caddy/compose.yml — добавить (остальное не трогать)
+networks:
+  planner-proxy:
+    external: true
+
+services:
+  caddy:
+    networks:
+      - edge
+      - planner-proxy
+```
+
+```bash
+docker network inspect planner-proxy >/dev/null 2>&1 || docker network create --internal planner-proxy
+cd /opt/caddy && docker compose config -q && docker compose up -d   # пересоздаст caddy: пауза в несколько секунд для всех сайтов хоста
+docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(docker compose ps -q caddy)"   # edge planner-proxy
+```
+
+`Caddyfile` менять не нужно: `reverse_proxy planner-app:8000` находит
+приложение по алиасу в `planner-proxy`.
+
 ## 2. Регулярный деплой
 
 Обычный путь — через CD (`.github/workflows/deploy.yml`): после зелёного
 CI на push в `main` GitHub Actions собирает образ, сканирует его Trivy
-(падает на CRITICAL) и только после этого публикует в GHCR под тегами
-`sha-<short>` и `latest` (публикуется ровно просканированный образ, без
-пересборки), затем по SSH выполняет:
+(падает на CRITICAL и HIGH, для которых есть исправленная версия) и
+только после этого публикует в GHCR под тегами `sha-<short>` и `latest`
+(публикуется ровно просканированный образ, без пересборки). Теги в GHCR
+изменяемые, поэтому на сервер уходит не тег, а ссылка с digest, который
+вернул этот `docker push`:
 
 ```bash
-ssh -i <deploy-key> deploy@<host> sha-<short>
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <deploy-key> deploy@<host> sha-<short>@sha256:<digest>
 ```
 
 Forced command `planner-deploy-wrapper` проверяет, что пришёл ровно один
-токен формата `^sha-[0-9a-f]{7,40}$`, и вызывает
-`sudo /usr/local/bin/planner-deploy sha-<short>`. Дальше `planner-deploy`:
+токен формата `^sha-[0-9a-f]{7,40}(@sha256:[0-9a-f]{64})?$` (без digest —
+для ручных деплоев и откатов), и вызывает
+`sudo /usr/local/bin/planner-deploy <tag>`. Значение целиком попадает в
+`IMAGE_TAG` в `.env`, Compose тянет `…:sha-<short>@sha256:<digest>` —
+ровно тот манифест, что просканирован, даже если тег потом перепишут.
+Дальше `planner-deploy`:
 
-1. запоминает текущий `IMAGE_TAG` из `.env`;
+1. читает текущий `IMAGE_TAG` из `.env` — это цель отката — и проверяет
+   его тем же регулярным выражением; если строки нет или значение не
+   похоже на тег (`latest`, ручная правка, мусор), выходит с кодом 1, не
+   вызывая docker вообще;
 2. `IMAGE_TAG=<новый> docker compose pull app migrate` — тег передаётся
    только через окружение; если образа нет или сеть упала, скрипт
    выходит с кодом 1, **не трогая** `.env` и работающий стек;
-3. только после успешного pull пишет новый тег в `.env` и делает
-   `docker compose up -d` (это прогоняет `migrate` — `alembic upgrade
-   head` от `planner_owner` — и перезапускает `app` на новом образе);
-4. до 60 секунд опрашивает `/healthz` изнутри контейнера `app`
+3. снимает снапшот базы: `pg_dump -U planner_owner -Fc planner` в
+   `/var/backups/gantt-planner/pre-deploy-<UTC-время>.dump` (0600, пишется
+   в `.tmp` и переименовывается; снапшоты старше 7 дней удаляются). Если
+   дамп не удался или пустой — выход с кодом 1, **ничего не изменено**:
+   без снапшота деплоя нет;
+4. пишет новый тег в `.env` и делает `docker compose up -d` (это
+   прогоняет `migrate` — `alembic upgrade head` от `planner_owner` — и
+   перезапускает `app` на новом образе);
+5. до 60 секунд опрашивает `/healthz` изнутри контейнера `app`
    (`docker compose exec app python -c ...`);
-5. если здоров — выходит с кодом 0;
-6. при **любой** ошибке после записи `.env` (упал `up -d`, например
+6. если здоров — выходит с кодом 0;
+7. при **любой** ошибке после записи `.env` (упал `up -d`, например
    `migrate` вышел с ошибкой; не прошёл healthcheck; скрипт прерван) —
-   ловушка `EXIT` возвращает в `.env` предыдущий тег, переподнимает стек
-   (`up -d`) и выходит с кодом 1 (CI увидит деплой как упавший). Так
-   `.env` никогда не остаётся с тегом, который не задеплоился.
+   ловушка `EXIT` (единственный путь отката) возвращает в `.env`
+   предыдущий тег и перезапускает **только приложение**:
+   `docker compose up -d --no-deps app` — без `migrate`. Затем ещё раз
+   проверяет `/healthz`, печатает, здоров ли откат, и имя снапшота из
+   п. 3, и выходит с кодом 1 (CI увидит деплой как упавший). Так `.env`
+   никогда не остаётся с тегом, который не задеплоился.
    Поведение покрыто `bash deploy/tests/test_planner_deploy.sh`
    (docker заглушён).
 
-Ограничение: автооткат рассчитан на релизы без новых миграций. Если новая
-версия успела применить миграцию, `migrate` старого образа не узнает
-новую ревизию и завершится с ошибкой, так что `up -d` при откате тоже
-упадёт (скрипт напишет «manual intervention needed»). Тогда — чинить
-вперёд новым тегом или `alembic downgrade` новым образом, при
-необходимости восстановить из бэкапа (раздел 4).
+Почему откат не запускает миграции: если новый релиз успел применить
+миграцию, `alembic upgrade head` в образе предыдущей версии не знает
+новую ревизию и падает («Can't locate revision»), а `app` зависит от
+успешного `migrate` и не стартовал бы вовсе. Поэтому откат оставляет
+схему как есть и поднимает старый код на новой схеме — это работает
+только при соблюдении правила ниже.
 
 После успешного деплоя CD дополнительно проверяет
 `https://gantt-ai-planner.duckdns.org/healthz` снаружи.
+
+### Правило: миграции только обратно совместимые
+
+Каждая миграция должна оставлять схему, на которой **предыдущий** релиз
+продолжает работать (expand/contract):
+
+- можно: новые таблицы, новые nullable-колонки или колонки с `DEFAULT`,
+  новые индексы (для больших таблиц — `CREATE INDEX CONCURRENTLY`),
+  новые значения в справочниках;
+- нельзя в одном релизе с кодом, который это использует: удалять или
+  переименовывать таблицы/колонки, менять тип колонки, добавлять
+  `NOT NULL` без `DEFAULT`, ужесточать ограничения, которые старый код
+  может нарушить;
+- переименование/удаление — в два релиза: сначала код перестаёт
+  использовать старое (и пишет в оба места, если нужно), и только в
+  следующем релизе миграция удаляет старое;
+- `downgrade()` по-прежнему пишется (CI гоняет `upgrade → downgrade base
+  → upgrade`), но при откате он не вызывается.
+
+Если релиз с деструктивной миграцией всё же ушёл и данные повреждены —
+восстановить снапшот, снятый перед ним (ниже).
 
 ### Ручной деплой конкретного тега (без CI)
 
 Отдельного `scripts/deploy-manual.sh`, который упоминает спецификация
 (§14), нет: его роль выполняют команды этого раздела и первого деплоя
-(§1, п. 4) — `planner-deploy` уже делает pull, запуск, healthcheck и
-откат.
+(§1, п. 4) — `planner-deploy` уже делает pull, снапшот, запуск,
+healthcheck и откат.
 
 ```bash
-ssh -i <deploy-key> deploy@<host> sha-<short>
+ssh -i <deploy-key> deploy@<host> sha-<short>                    # по тегу
+ssh -i <deploy-key> deploy@<host> sha-<short>@sha256:<digest>    # по digest (надёжнее)
 ```
 
 Или прямо на сервере от root (в обход wrapper'а, например для
@@ -168,34 +268,98 @@ sudo /usr/local/bin/planner-deploy sha-<short>
 
 ### Откат
 
-Откат — это обычный деплой предыдущего тега:
+Откат на релиз **без миграций между ним и текущим** — это обычный деплой
+предыдущего тега:
 
 ```bash
 ssh -i <deploy-key> deploy@<host> sha-<предыдущий-short>
 ```
 
-Короткий тег предыдущего успешного деплоя можно взять:
-- из истории запусков workflow `Deploy` в GitHub Actions;
-- из `/opt/gantt-planner/.env` — `planner-deploy` перед каждым деплоем
-  печатает в лог `previous: '<tag>'`, это видно в journalctl/логах sshd
-  или можно посмотреть теги образов в GHCR по времени публикации.
+Тег предыдущего успешного деплоя можно взять:
+- из истории запусков workflow `Deploy` в GitHub Actions (шаг push
+  печатает и digest);
+- из лога `planner-deploy`: перед каждым деплоем он печатает
+  `previous: '<tag>'` (виден в выводе шага «Deploy over SSH» в Actions).
 
-`planner-deploy` откатывается автоматически при неуспешном healthcheck,
-описанный выше ручной откат нужен, если проблема обнаружилась позже
-(например, в логах или у пользователей), а не сразу при деплое.
+`planner-deploy` откатывается автоматически при неуспешном healthcheck;
+ручной откат нужен, если проблема обнаружилась позже (например, в логах
+или у пользователей), а не сразу при деплое.
+
+Если после целевого тега были миграции, обычный деплой старого тега не
+пройдёт: его `migrate` упадёт на неизвестной ревизии, и `planner-deploy`
+сам вернётся на текущий тег. Тогда откатывать только код, без
+`migrate`, вручную от root (схема обратно совместима по правилу выше):
+
+```bash
+cd /opt/gantt-planner
+old='sha-<предыдущий-short>'            # или sha-<short>@sha256:<digest>
+IMAGE_TAG="$old" docker compose -f compose.prod.yml pull app
+sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=$old|" .env
+docker compose -f compose.prod.yml up -d --no-deps app
+docker compose -f compose.prod.yml ps app   # дождаться (healthy)
+```
+
+Пока в `.env` стоит тег старше схемы, любые перезапуски `app` делать с
+`--no-deps` (как в разделе 3): без него Compose заодно запустит
+`migrate` старого образа, тот упадёт, и `app` не поднимется. Следующий
+нормальный деплой (новее схемы) снимает это ограничение.
+
+### Восстановление снапшота перед деплоем
+
+Снапшоты `pre-deploy-<UTC>.dump` лежат рядом с ночными дампами
+(`ls -lt /var/backups/gantt-planner/`); имя снапшота конкретного деплоя
+`planner-deploy` печатает в лог (и повторяет при автооткате). Это
+полный `pg_dump -Fc` базы `planner`, восстановление **заменяет** базу
+целиком: всё, что пользователи записали после снапшота, пропадёт.
+Сначала проверить дамп на scratch-базе (раздел 4), потом:
+
+```bash
+cd /opt/gantt-planner
+snap=/var/backups/gantt-planner/pre-deploy-<UTC>.dump
+
+# 1. остановить приложение (даунтайм до п. 5)
+docker compose -f compose.prod.yml stop app
+
+# 2. на всякий случай — дамп текущего состояния
+( umask 077 && docker compose -f compose.prod.yml exec -T db \
+    pg_dump -U planner_owner -Fc planner > /var/backups/gantt-planner/before-restore-$(date -u +%Y%m%dT%H%M%SZ).dump )
+
+# 3. пересоздать базу: объекты, созданные после снапшота (таблицы новых
+#    миграций), тоже исчезнут, и ревизия alembic вернётся к снапшотной
+docker compose -f compose.prod.yml exec -T db psql -U postgres -v ON_ERROR_STOP=1 \
+  -c "DROP DATABASE planner WITH (FORCE);" \
+  -c "CREATE DATABASE planner OWNER planner_owner;"
+
+# 4. восстановить (владельцы, GRANT'ы для planner_app и default privileges
+#    восстанавливаются из дампа)
+docker compose -f compose.prod.yml exec -T db pg_restore -U postgres -d planner --exit-on-error < "$snap"
+
+# 5. вернуть тег, который работал с этой схемой (тот, что был до
+#    неудачного деплоя), и поднять только приложение
+sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=sha-<тег-до-деплоя>|' .env
+docker compose -f compose.prod.yml up -d --no-deps app
+curl -fsS https://gantt-ai-planner.duckdns.org/healthz
+```
+
+Процедура проверена на копии стека: после восстановления таблицы
+принадлежат `planner_owner`, у `planner_app` снова только DML, default
+privileges на месте, приложение пишет в базу.
 
 ## 3. Ротация секретов
 
 При любой ротации: сначала положить новое значение, затем перезапустить
 только те контейнеры, которым оно нужно (secrets в Compose читаются при
-старте контейнера, hot reload не поддерживается).
+старте контейнера, hot reload не поддерживается). `app` перезапускается
+с `--no-deps`: иначе Compose заодно заново запустит `migrate`, а после
+отката на тег старше схемы (раздел 2, «Откат») тот упадёт и `app` не
+поднимется.
 
 ### Ключ Anthropic
 
 ```bash
 # Ключ вводится без эха и не попадает ни в историю shell, ни в аргументы команд.
 read -rs -p 'Новый ключ Anthropic: ' key && printf '%s' "$key" > /opt/gantt-planner/secrets/anthropic_api_key; unset key
-cd /opt/gantt-planner && docker compose -f compose.prod.yml up -d --force-recreate app
+cd /opt/gantt-planner && docker compose -f compose.prod.yml up -d --no-deps --force-recreate app
 ```
 Старый ключ отозвать в консоли Anthropic после подтверждения, что новый
 работает.
@@ -213,7 +377,7 @@ cd /opt/gantt-planner
 install -m 0444 -o root -g root /dev/stdin secrets/openrouter_api_key
 # Вставить ключ (sk-or-v1-...) одной строкой без завершающего перевода
 # строки и нажать Ctrl+D (EOF). Ctrl+C прервёт без изменения файла.
-docker compose -f compose.prod.yml up -d --force-recreate app
+docker compose -f compose.prod.yml up -d --no-deps --force-recreate app
 ```
 Старый ключ отозвать в личном кабинете OpenRouter после подтверждения, что
 новый работает. Тот же приём (`install -m 0444 -o root -g root /dev/stdin
@@ -236,7 +400,7 @@ sed -i \
   -e 's/^LLM_PROVIDER=.*/LLM_PROVIDER=openrouter/' \
   -e 's/^LLM_MODEL=.*/LLM_MODEL=anthropic\/claude-sonnet-5/' \
   .env
-docker compose -f compose.prod.yml up -d --force-recreate app
+docker compose -f compose.prod.yml up -d --no-deps --force-recreate app
 ```
 Убедиться, что соответствующий секрет (`secrets/openrouter_api_key` или
 `secrets/anthropic_api_key`) уже заполнен — иначе приложение молча уйдёт в
@@ -277,7 +441,7 @@ cd /opt/gantt-planner
 mv secrets/db_app_password.new secrets/db_app_password
 chmod 0444 secrets/db_app_password
 
-docker compose -f compose.prod.yml up -d --force-recreate app
+docker compose -f compose.prod.yml up -d --no-deps --force-recreate app
 ```
 
 Если ALTER упал, `.new`-файл остаётся, а рабочий пароль не меняется —
@@ -310,6 +474,25 @@ Postgres создаёт роли один раз, при первом старт
 Бэкап делает `deploy/backup.sh` каждую ночь в 03:15
 (`/etc/cron.d/gantt-planner-backup`): `pg_dump -Fc` от `planner_owner` в
 `/var/backups/gantt-planner/<дата>.dump`, дампы старше 7 дней удаляются.
+Пустой вывод `pg_dump` считается ошибкой и не затирает хороший дамп.
+
+Сбой бэкапа не проходит молча — каждый запуск оставляет след:
+
+```bash
+journalctl -t gantt-planner-backup --since -2d   # "ok: wrote ..." или "FAILED (exit N) ..."
+cat /var/lib/gantt-planner/backup-status          # итог последнего запуска
+tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод cron (stderr pg_dump)
+```
+
+`backup-status` — пары `ключ=значение`: `timestamp` (UTC), `status`
+(`ok`/`fail`), `exit_code`, `size_bytes`, `file` и `last_ok` — время
+последнего успешного бэкапа, сохраняется и после неудачных запусков
+(видно, насколько устарел свежайший хороший дамп). Внешнего алерта на
+бэкап пока нет (uptime-мониторинг из раздела 6 сервер изнутри не
+видит) — проверять `backup-status` при каждом заходе на сервер.
+
+Снапшоты `pre-deploy-*.dump` (раздел 2) лежат в том же каталоге и
+годятся для восстановления так же, как ночные.
 
 Восстановление проверяется руками, в отдельную (scratch) базу, **не** в
 `planner` — чтобы не задеть продакшен-данные:
@@ -372,3 +555,49 @@ deploy-ключ или сам сервер — отзываем всё сраз�
    issue.
 7. Только после того, как все новые секреты на месте и стек передеплоен
    — считать инцидент закрытым.
+
+## 6. Мониторинг доступности и алерты
+
+`.github/workflows/uptime.yml` раз в 15 минут (и вручную — Actions →
+Uptime → Run workflow) проверяет прод снаружи, с раннера GitHub:
+
+- `GET https://gantt-ai-planner.duckdns.org/healthz` — `200` и
+  `{"status":"ok"}` (приложение живо и достаёт до базы);
+- `GET /api/meta` — `200` и `llm_mode` не `fake`: `fake` на проде значит,
+  что ключ LLM пустой или не прочитался (раздел 1, п. 3; раздел 3).
+
+Проверка повторяется до 3 раз с паузой 20 секунд, так что разовый сбой
+сети алерта не вызывает. Если все попытки неудачны:
+
+- открывается issue с меткой `uptime` (метка создаётся автоматически),
+  а если такой issue уже открыт — в него добавляется комментарий с
+  результатом очередной проверки (то есть во время долгого простоя —
+  раз в ~15 минут);
+- запуск workflow помечается упавшим — GitHub присылает письмо о падении
+  scheduled-workflow (тому, кто последним менял cron в файле).
+
+Когда проверка снова проходит, workflow закрывает открытые issue
+`uptime` с комментарием о восстановлении. Чтобы получать алерты, нужно
+следить за репозиторием (Watch → Custom → Issues) или за письмами об
+упавших workflow.
+
+Что делать при алерте:
+
+1. Открыть issue — там причина с последней попытки (код ответа и
+   начало тела) и ссылка на запуск.
+2. `healthz` не `200` / таймаут: на сервере
+   `cd /opt/gantt-planner && docker compose -f compose.prod.yml ps` и
+   `logs --tail 200 app db`; проверить Caddy
+   (`cd /opt/caddy && docker compose ps && docker compose logs --tail 100`)
+   и что он в сетях `edge` и `planner-proxy`. Если сломал последний
+   деплой — откат (раздел 2).
+3. `llm_mode` = `fake`: заполнить ключ LLM (раздел 3) и перезапустить
+   `app`.
+4. Issue закроется сам на следующей успешной проверке (или запустить
+   Uptime вручную).
+
+Ограничения: GitHub запускает schedule только из ветки по умолчанию, с
+задержкой до десятков минут при нагрузке, и отключает его после 60 дней
+без активности в репозитории (включить обратно: Actions → Uptime →
+Enable workflow). Это внешняя проверка «сайт отвечает», а не метрики:
+задержки, ошибки внутри приложения и бэкапы (раздел 4) она не видит.

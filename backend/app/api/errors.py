@@ -19,6 +19,7 @@ STATUS = {
     "not_found": 404,
     "bad_origin": 403,
     "file_too_large": 413,
+    "plan_too_large": 413,
 }
 
 

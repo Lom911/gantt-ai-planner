@@ -1,0 +1,62 @@
+import type { Zoom } from "@/components/gantt/mapping";
+
+// Per-browser layout the user adjusted by hand — chart/chat split, the grid/timeline divider,
+// grid column widths, zoom — kept in localStorage so a reload or tomorrow's visit opens the same
+// way. It's a convenience only: every read/write is guarded (private mode, blocked storage,
+// quota) and anything missing, corrupt or out of range falls back to the defaults.
+export interface LayoutPrefs {
+  splitRatio?: number; // chart pane width / whole width
+  gridWidth?: number; // px, grid (table) part of the chart
+  columns?: Record<string, number>; // px per grid column id
+  zoom?: Zoom;
+}
+
+const KEY = "gantt-ai-planner:layout:v1";
+const COLUMN_IDS = new Set(["id", "text", "assignee", "startLabel", "workDays"]);
+const ZOOMS = new Set<Zoom>(["day", "week", "month"]);
+
+const inRange = (v: unknown, min: number, max: number): v is number =>
+  typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+
+function sanitize(raw: unknown): LayoutPrefs {
+  if (typeof raw !== "object" || raw === null) return {};
+  const r = raw as Record<string, unknown>;
+  const out: LayoutPrefs = {};
+  if (inRange(r.splitRatio, 0.2, 0.9)) out.splitRatio = r.splitRatio;
+  if (inRange(r.gridWidth, 120, 1400)) out.gridWidth = Math.round(r.gridWidth);
+  if (typeof r.columns === "object" && r.columns !== null) {
+    const cols = Object.fromEntries(
+      Object.entries(r.columns as Record<string, unknown>).filter(
+        (e): e is [string, number] => COLUMN_IDS.has(e[0]) && inRange(e[1], 30, 800),
+      ),
+    );
+    if (Object.keys(cols).length > 0) out.columns = cols;
+  }
+  if (typeof r.zoom === "string" && ZOOMS.has(r.zoom as Zoom)) out.zoom = r.zoom as Zoom;
+  return out;
+}
+
+export function loadLayoutPrefs(): LayoutPrefs {
+  try {
+    const raw = localStorage.getItem(KEY);
+    return raw ? sanitize(JSON.parse(raw)) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveLayoutPrefs(patch: LayoutPrefs): void {
+  try {
+    localStorage.setItem(KEY, JSON.stringify({ ...loadLayoutPrefs(), ...patch }));
+  } catch {
+    /* storage unavailable: the layout just won't be remembered */
+  }
+}
+
+export function clearLayoutPrefs(): void {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    /* nothing to clear */
+  }
+}

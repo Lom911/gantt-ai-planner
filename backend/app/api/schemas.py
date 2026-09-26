@@ -56,6 +56,16 @@ class McpTokenResponse(BaseModel):
     claude_desktop_config: dict[str, Any]
 
 
+class McpTokenStatus(BaseModel):
+    # Never the token itself: only the short prefix stored next to its hash. An expired (but
+    # not revoked) token is still described, with active=False, so the UI can say it expired.
+    active: bool
+    prefix: str | None = None
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
 def to_plan_response(state: PlanState, busy: bool) -> PlanResponse:
     return PlanResponse(
         version=state.version,

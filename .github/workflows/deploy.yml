@@ -69,14 +69,35 @@ jobs:
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
-          severity: CRITICAL
+          # Block on HIGH too, but only when a fixed version exists (ignore-unfixed): an
+          # unfixable base-image CVE would otherwise block every deploy with nothing to do.
+          severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
 
+      # GHCR tags are mutable, so the server is told to deploy `sha-<short>@sha256:<digest>`:
+      # Compose pulls exactly that manifest, whatever the tag points at by then. The digest
+      # comes from this push itself, not from build-push-action's output: that build only
+      # loaded the image into the local daemon, and the daemon may re-encode the manifest on
+      # push, so only `docker push` knows the digest the registry actually stores.
       - name: Push scanned image to GHCR
+        id: push
+        env:
+          IMAGE: ghcr.io/alomaev-hue/gantt-ai-planner
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          docker push ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
-          docker push ghcr.io/alomaev-hue/gantt-ai-planner:latest
+          set -euo pipefail
+          docker push "$IMAGE:$TAG" | tee "$RUNNER_TEMP/push.log"
+          docker push "$IMAGE:latest"
+          digest="$(sed -nE "s/^${TAG}: digest: (sha256:[0-9a-f]{64}) size: [0-9]+\$/\\1/p" "$RUNNER_TEMP/push.log" | tail -n1)"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not read the pushed manifest digest from the docker push output"
+            exit 1
+          fi
+          # The registry must serve that exact digest before the server is asked to pull it.
+          docker buildx imagetools inspect "$IMAGE@$digest" >/dev/null
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "ref=$TAG@$digest" >> "$GITHUB_OUTPUT"
 
       - name: Deploy over SSH
         env:
@@ -84,7 +105,8 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_USER: ${{ vars.DEPLOY_USER }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          # sha-<short>@sha256:<digest>; planner-deploy-wrapper validates the shape.
+          TAG: ${{ steps.push.outputs.ref }}
         run: |
           set -euo pipefail
           key_file="$(mktemp)"
@@ -93,7 +115,11 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
+          # BatchMode: never fall back to an interactive prompt; IdentitiesOnly: offer only
+          # the deploy key, never whatever else an agent on the runner might hold.
           ssh -i "$key_file" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
             -o UserKnownHostsFile="$known_hosts_file" \
             -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" "$TAG"

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import ChatMessageRow, ChatUsageRow, McpTokenRow, PlanVersionRow, SessionRow
@@ -39,6 +39,18 @@ async def get_session(db: AsyncSession, session_id: uuid.UUID) -> SessionRow | N
 async def touch_session(db: AsyncSession, session_id: uuid.UUID) -> None:
     await db.execute(
         update(SessionRow).where(SessionRow.id == session_id).values(last_seen_at=func.now())
+    )
+
+
+async def lock_session_plan(db: AsyncSession, session_id: uuid.UUID) -> None:
+    """Serializes the transactions that change one session's plan (apply, undo/redo, import,
+    reset) in the database itself, not just in the process (SessionLocks): with a second
+    worker, two of them could both read version N and write N+1 — a unique violation or a
+    lost update. Transaction-scoped: released on commit or rollback. Must be the first
+    statement of the transaction, so everything it reads afterwards is already the other
+    writer's committed result."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:sid, 0))"), {"sid": str(session_id)}
     )
 
 
@@ -79,6 +91,29 @@ async def get_version(
             PlanVersionRow.session_id == session_id, PlanVersionRow.version_no == version_no
         )
     )
+
+
+async def get_current_version_ref(
+    db: AsyncSession, session_id: uuid.UUID
+) -> tuple[int, int] | None:
+    """(version_no, plan_versions.id) of the session's current version, in one round trip.
+    The row id — never reused, unlike version_no after an undo + new edit — keys the
+    in-memory plan cache in PlanService."""
+    row = (
+        await db.execute(
+            select(PlanVersionRow.version_no, PlanVersionRow.id)
+            .join(SessionRow, SessionRow.id == PlanVersionRow.session_id)
+            .where(
+                SessionRow.id == session_id,
+                PlanVersionRow.version_no == SessionRow.current_version,
+            )
+        )
+    ).first()
+    return (row[0], row[1]) if row else None
+
+
+async def get_version_snapshot(db: AsyncSession, version_id: int) -> dict[str, Any] | None:
+    return await db.scalar(select(PlanVersionRow.snapshot).where(PlanVersionRow.id == version_id))
 
 
 async def list_version_meta(db: AsyncSession, session_id: uuid.UUID) -> list[VersionMeta]:
@@ -222,6 +257,16 @@ async def get_active_mcp_token(
             McpTokenRow.revoked_at.is_(None),
             McpTokenRow.expires_at > now,
         )
+    )
+
+
+async def latest_mcp_token(db: AsyncSession, session_id: uuid.UUID) -> McpTokenRow | None:
+    """The session's newest non-revoked token, expired or not (issuing one revokes the rest)."""
+    return await db.scalar(
+        select(McpTokenRow)
+        .where(McpTokenRow.session_id == session_id, McpTokenRow.revoked_at.is_(None))
+        .order_by(McpTokenRow.created_at.desc())
+        .limit(1)
     )
 
 

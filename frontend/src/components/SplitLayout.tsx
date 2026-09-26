@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layoutPrefs";
 
 const MOBILE_BREAKPOINT = 768;
 const LEFT_MIN_WIDTH = 360;
@@ -11,6 +12,9 @@ export function SplitLayout({ left, right }: { left: ReactNode; right: ReactNode
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < MOBILE_BREAKPOINT);
   const [tab, setTab] = useState<"chart" | "chat">("chart");
   const [leftWidth, setLeftWidth] = useState<number | null>(null);
+  // The split the user dragged to last time (as a share of the width, so it fits any window).
+  const [savedRatio] = useState(() => loadLayoutPrefs().splitRatio);
+  const lastWidth = useRef<number | null>(null);
   const dragging = useRef(false);
 
   useEffect(() => {
@@ -28,7 +32,9 @@ export function SplitLayout({ left, right }: { left: ReactNode; right: ReactNode
     (e: PointerEvent) => {
       if (!dragging.current || !containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-      setLeftWidth(clamp(e.clientX - rect.left, rect.width));
+      const width = clamp(e.clientX - rect.left, rect.width);
+      lastWidth.current = width;
+      setLeftWidth(width);
     },
     [clamp],
   );
@@ -36,6 +42,8 @@ export function SplitLayout({ left, right }: { left: ReactNode; right: ReactNode
   const stopDragging = useCallback(() => {
     dragging.current = false;
     window.removeEventListener("pointermove", onPointerMove);
+    const total = containerRef.current?.getBoundingClientRect().width;
+    if (lastWidth.current != null && total) saveLayoutPrefs({ splitRatio: lastWidth.current / total });
   }, [onPointerMove]);
 
   const startDragging = useCallback(() => {
@@ -72,7 +80,17 @@ export function SplitLayout({ left, right }: { left: ReactNode; right: ReactNode
       )}
       <div
         className={cn("min-h-0 overflow-auto", isMobile && "flex-1")}
-        style={isMobile ? undefined : { width: leftWidth ?? `${DEFAULT_LEFT_RATIO * 100}%`, flexShrink: 0 }}
+        style={
+          isMobile
+            ? undefined
+            : {
+                width: leftWidth ?? `${(savedRatio ?? DEFAULT_LEFT_RATIO) * 100}%`,
+                // A saved share can land outside the pane limits on a smaller window.
+                minWidth: LEFT_MIN_WIDTH,
+                maxWidth: `calc(100% - ${RIGHT_MIN_WIDTH}px)`,
+                flexShrink: 0,
+              }
+        }
         hidden={isMobile && tab !== "chart"}
       >
         {left}

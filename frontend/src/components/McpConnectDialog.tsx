@@ -1,6 +1,8 @@
 import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
+import { formatRuDateTime } from "@/lib/dates";
 import type { McpTokenResponse } from "@/api/types";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 
@@ -12,6 +14,8 @@ async function copyToClipboard(text: string, label: string): Promise<void> {
     toast.error(`Не удалось скопировать: ${label.toLowerCase()}`);
   }
 }
+
+const MCP_STATUS_KEY = ["mcp-token-status"];
 
 // spec §8: the token is issued once, shown once (server keeps only sha256 + prefix), lives up to
 // 7 days, and issuing a new one revokes whatever was issued before.
@@ -25,6 +29,16 @@ export function McpConnectDialog({
   const [issued, setIssued] = useState<McpTokenResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether a token issued earlier (another tab, a previous visit) is still live — the token
+  // itself is shown only once, but its status can be checked and it can be revoked any time.
+  const queryClient = useQueryClient();
+  const { data: status } = useQuery({
+    queryKey: MCP_STATUS_KEY,
+    queryFn: api.mcpTokenStatus,
+    enabled: open,
+    retry: false,
+  });
+  const refreshStatus = () => void queryClient.invalidateQueries({ queryKey: MCP_STATUS_KEY });
 
   const handleOpenChange = (next: boolean) => {
     if (!next) {
@@ -39,6 +53,7 @@ export function McpConnectDialog({
     setError(null);
     try {
       setIssued(await api.createMcpToken());
+      refreshStatus();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Не удалось выпустить токен");
     } finally {
@@ -52,6 +67,7 @@ export function McpConnectDialog({
       await api.revokeMcpToken();
       toast.success("Токен отозван");
       setIssued(null);
+      refreshStatus();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Не удалось отозвать токен");
     } finally {
@@ -74,13 +90,32 @@ export function McpConnectDialog({
           {!issued ? (
             <>
               {error && <p className="text-sm text-destructive">{error}</p>}
+              {status?.active && (
+                <div className="flex flex-col gap-2 rounded-md border border-border p-2 text-sm">
+                  <p>
+                    Активный токен <span className="font-mono">{status.prefix}…</span>
+                    {status.last_used_at
+                      ? ` · последнее использование ${formatRuDateTime(status.last_used_at)}`
+                      : " · ещё не использовался"}
+                    {status.expires_at && ` · действует до ${formatRuDateTime(status.expires_at)}`}
+                  </p>
+                  <button
+                    type="button"
+                    className="self-start rounded-md border border-input px-3 py-1.5 text-sm text-destructive hover:bg-accent disabled:opacity-50"
+                    disabled={loading}
+                    onClick={() => void revokeToken()}
+                  >
+                    Отозвать
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 className="self-start rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
                 disabled={loading}
                 onClick={() => void issueToken()}
               >
-                Выпустить токен
+                {status?.active ? "Выпустить новый токен (старый перестанет работать)" : "Выпустить токен"}
               </button>
             </>
           ) : (

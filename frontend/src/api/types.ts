@@ -207,6 +207,15 @@ export interface McpTokenResponse {
 }
 
 // spec §6: version.source, also used as-is by task history entries below.
+// GET /api/mcp-token: whether this session has a live MCP token (never the token itself).
+export interface McpTokenStatus {
+  active: boolean;
+  prefix: string | null;
+  created_at: string | null;
+  expires_at: string | null;
+  last_used_at: string | null;
+}
+
 export type VersionSource = "seed" | "import" | "user" | "agent" | "mcp" | "reset";
 
 // GET /api/plan/tasks/{id}/history (spec §10, §6: "вычисляется из diff сохранённых версий") —
