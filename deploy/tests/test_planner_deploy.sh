@@ -88,6 +88,26 @@ run_case "failed health check restores the previous tag and restarts it" 1 "$pre
 run_case "failed rollback up -d still leaves .env on the previous tag" 1 "$prev" \
     "up -d \[tag=$prev\]" "" FAIL_UP=all
 
+# Digest-pinned tags (what CD sends): written to .env verbatim - the '@' and ':'
+# must survive set_tag's sed in both directions (deploy and rollback).
+digest_a="sha256:$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+digest_b="sha256:$(printf 'fedcba9876543210%.0s' 1 2 3 4)"
+new="sha-2222222@$digest_a"
+run_case "healthy deploy of a digest-pinned tag writes it to .env verbatim" 0 "$new" \
+    "pull app migrate \[tag=$new\]" ""
+prev="sha-1111111@$digest_b"
+run_case "failed health check restores a digest-pinned previous tag verbatim" 1 "$prev" \
+    "up -d \[tag=$prev\]" "" HEALTHY=0
+
+# Malformed tags never reach docker and leave .env alone.
+prev=sha-1111111
+for bad in "sha-2222222@${digest_a%?}" "sha-2222222@sha512:${digest_a#sha256:}" \
+    "sha-2222222@sha256:$(printf 'ABCDEF0123456789%.0s' 1 2 3 4)" "sha-2222222@$digest_a@$digest_b" \
+    "latest"; do
+    new="$bad"
+    run_case "malformed tag '$bad' rejected before any docker call" 1 "$prev" "" "."
+done
+
 echo
 echo "test_planner_deploy.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

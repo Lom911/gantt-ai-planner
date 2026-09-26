@@ -7,12 +7,17 @@
 # `sudo planner-deploy <tag>` from planner-deploy-wrapper (the forced
 # command for the 'deploy' SSH user) - never run directly over SSH by an
 # untrusted caller.
+#
+# <tag> is `sha-<hex>` or, as CD sends it, `sha-<hex>@sha256:<digest>`: the
+# digest pins the exact image CI scanned and pushed (GHCR tags are mutable).
+# Compose accepts `name:tag@digest` references, so the value goes into
+# IMAGE_TAG in .env as is.
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
 ENV_FILE="$APP_DIR/.env"
 COMPOSE_FILE="$APP_DIR/compose.prod.yml"
-TAG_RE='^sha-[0-9a-f]{7,40}$'
+TAG_RE='^sha-[0-9a-f]{7,40}(@sha256:[0-9a-f]{64})?$'
 HEALTH_TIMEOUT=60
 HEALTH_INTERVAL=3
 
@@ -49,7 +54,11 @@ fi
 set_tag() {
     tag="$1"
     if grep -qE '^IMAGE_TAG=' "$ENV_FILE"; then
-        sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${tag}/" "$ENV_FILE"
+        # The value contains '@' and ':' (digest form). It is TAG_RE-validated, but
+        # still use a delimiter that TAG_RE can never produce and escape everything
+        # that is special in a sed replacement, so sed can only ever copy it verbatim.
+        tag_escaped="$(printf '%s' "$tag" | sed -e 's/[\\|&]/\\&/g')"
+        sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${tag_escaped}|" "$ENV_FILE"
     else
         echo "IMAGE_TAG=${tag}" >> "$ENV_FILE"
     fi
