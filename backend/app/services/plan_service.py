@@ -38,8 +38,10 @@ Source = Literal["seed", "import", "user", "agent", "mcp", "reset"]
 # last_seen_at only drives the idle-session cleanup (days), so it is refreshed at most this
 # often instead of an UPDATE (and a WAL write) on every request.
 TOUCH_INTERVAL = timedelta(minutes=10)
-# Scheduled plans kept in memory, bounded by the size of their JSON snapshots.
-PLAN_CACHE_MAX_BYTES = 8_000_000
+# Scheduled plans kept in memory, bounded by the size of their JSON snapshots. As Python objects
+# a plan takes roughly 10x its JSON size, and the container has 300 MB (the load test peaked at
+# ~245 MB with 8 MB here), so this stays small: ~200 demo-sized plans.
+PLAN_CACHE_MAX_BYTES = 2_000_000
 MCP_WAIT_SECONDS = 10.0
 
 # Sources that REPLACE the whole plan rather than editing it in place. A task's history must
