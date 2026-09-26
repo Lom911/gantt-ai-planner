@@ -360,6 +360,55 @@ async def test_trace_line_is_logged_for_a_turn_without_tools(app, caplog):
     assert " outcome=done iterations=1 tools=- " in line
 
 
+class MassDeleter:
+    """A model talked into deleting tasks 1-6 with confirmed=true right away (security audit
+    L3: e.g. by an instruction hidden in a task description), then answering."""
+
+    def __init__(self):
+        self.tool_results = []
+
+    async def stream(self, *, system, tools, messages):
+        last = messages[-1]["content"]
+        if isinstance(last, list):
+            self.tool_results.append(last[0]["content"])
+            yield Completed(_final_turn("Подтвердите удаление задач 1–6."))
+        else:
+            ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
+            args = {"operations": ops, "confirmed": True}
+            yield Completed(_tool_turn(f"d{len(messages)}", "apply_operations", args))
+
+
+async def test_model_cannot_confirm_a_mass_delete_without_the_users_yes(app):
+    llm = MassDeleter()
+    agent = Agent(llm, app.state.tool_client, app.state.service, today=lambda: TODAY)
+    sid = await new_sid(app)
+    events = await collect(agent, sid, "Удали задачи 1, 2, 3, 4, 5, 6")
+    assert events[-1]["type"] == "done"
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [False]
+    # The server asked for confirmation again, and the model is told why its flag was dropped.
+    assert "confirmation_required" in llm.tool_results[0]
+    assert "подтверждения" in llm.tool_results[0]
+    state = await app.state.service.get_state(sid)
+    assert state.version == 1 and len(state.plan.tasks) == 25
+
+    events = await collect(agent, sid, "да нет, не надо")
+    assert len((await app.state.service.get_state(sid)).plan.tasks) == 25
+
+    events = await collect(agent, sid, "Да, удаляй")
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [True]
+    state = await app.state.service.get_state(sid)
+    assert state.version == 2 and len(state.plan.tasks) == 19
+
+
+async def test_confirmation_guard_is_counted_in_the_trace(app, caplog):
+    agent = Agent(MassDeleter(), app.state.tool_client, app.state.service, today=lambda: TODAY)
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        await collect(agent, sid, "Удали задачи 1, 2, 3, 4, 5, 6")
+    [line] = _trace_lines(caplog)
+    assert " confirm_blocked=1 " in line
+
+
 async def test_trace_line_is_logged_when_the_client_goes_away(app, caplog):
     sid = await new_sid(app)
     with caplog.at_level(logging.INFO, logger="app.agent.trace"):

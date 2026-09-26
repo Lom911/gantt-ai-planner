@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+from app.agent.confirmation import is_explicit_confirmation
 from app.agent.llm import LLM, Completed, LLMError, LLMTurnResult, LLMUsage, TextDelta
 from app.agent.prompt import build_system
 from app.db import repo
@@ -28,6 +29,12 @@ MUTATING_TOOLS = {"apply_operations", "undo"}
 MAX_TOOL_RESULT_CHARS = 20_000
 # The third knob: real billed tokens, summed over the turn's LLM calls (see TurnStats).
 DEFAULT_TURN_TOKEN_BUDGET = 300_000
+# Prepended to the tool result when the loop dropped the model's confirmed=true (see _loop),
+# so the model asks the user instead of retrying the same call.
+CONFIRMATION_DROPPED_NOTE = (
+    "[confirmed=true не принят: в текущем сообщении пользователя нет явного подтверждения. "
+    "Спроси пользователя и дождись его ответа «да».]\n"
+)
 
 
 class TooManySteps(Exception):
@@ -45,6 +52,7 @@ class TurnStats:
     usage: LLMUsage = field(default_factory=LLMUsage)
     iterations: int = 0  # LLM calls made
     tools: list[str] = field(default_factory=list)  # tools run, in order
+    confirm_blocked: int = 0  # confirmed=true flags dropped by the guard in _loop
 
 
 def _trace(
@@ -58,7 +66,7 @@ def _trace(
     tools = ",".join(_UNSAFE_LOG_CHARS.sub("?", name)[:64] for name in stats.tools) or "-"
     trace_logger.info(
         "agent_turn sid=%s turn=%s outcome=%s iterations=%d tools=%s tokens_in=%d tokens_out=%d"
-        " cache_write=%d cache_read=%d tokens_total=%d duration_ms=%d",
+        " cache_write=%d cache_read=%d tokens_total=%d confirm_blocked=%d duration_ms=%d",
         str(session_id)[:8],
         turn_id,
         outcome,
@@ -69,6 +77,7 @@ def _trace(
         u.cache_creation_input_tokens,
         u.cache_read_input_tokens,
         u.total,
+        stats.confirm_blocked,
         round(seconds * 1000),
     )
 
@@ -132,7 +141,15 @@ class Agent:
                 failure: dict[str, Any] | None = None
                 try:
                     async with aclosing(
-                        self._bounded(session_id, turn_id, start, history, text_parts, stats)
+                        self._bounded(
+                            session_id,
+                            turn_id,
+                            start,
+                            history,
+                            text_parts,
+                            stats,
+                            user_confirmed=is_explicit_confirmation(user_text),
+                        )
                     ) as bounded:
                         async for event in bounded:
                             yield event
@@ -207,6 +224,8 @@ class Agent:
         history: list[ChatMessageRow],
         text_parts: list[str],
         stats: TurnStats,
+        *,
+        user_confirmed: bool,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Runs `_loop` in a background task and forwards its events, bounding the whole
         turn to `self._timeout` seconds via a wall-clock deadline.
@@ -225,7 +244,13 @@ class Agent:
         async def pump() -> None:
             try:
                 async for event in self._loop(
-                    session_id, turn_id, start, history, text_parts, stats
+                    session_id,
+                    turn_id,
+                    start,
+                    history,
+                    text_parts,
+                    stats,
+                    user_confirmed=user_confirmed,
                 ):
                     await queue.put(event)
             except Exception as exc:  # forwarded to the consumer below, not swallowed
@@ -261,6 +286,8 @@ class Agent:
         history: list[ChatMessageRow],
         text_parts: list[str],
         stats: TurnStats,
+        *,
+        user_confirmed: bool,
     ) -> AsyncIterator[dict[str, Any]]:
         system = build_system(render_plan_table(start.scheduled, self._today()))
         messages = to_llm_messages(history)
@@ -296,9 +323,20 @@ class Agent:
             for call in result.tool_calls:
                 stats.tools.append(call.name)
                 yield {"type": "tool_started", "name": call.name}
-                r = await self._tools.call(
-                    call.name, call.input, session_id=session_id, turn_id=turn_id
+                args = call.input
+                # Security audit L3: only the user's own reply in THIS turn can confirm a mass
+                # deletion; a flag the model set on its own (text in the plan can talk it into
+                # that) is dropped, so the server answers confirmation_required again. External
+                # MCP clients don't go through here: their flag reaches the server as sent.
+                blocked = (
+                    call.name == "apply_operations"
+                    and not user_confirmed
+                    and args.get("confirmed", False) is not False
                 )
+                if blocked:
+                    args = {**args, "confirmed": False}
+                    stats.confirm_blocked += 1
+                r = await self._tools.call(call.name, args, session_id=session_id, turn_id=turn_id)
                 summary = r.text[:200] if r.is_error else (r.data or {}).get("summary")
                 yield {
                     "type": "tool_finished",
@@ -308,11 +346,14 @@ class Agent:
                 }
                 if call.name in MUTATING_TOOLS and not r.is_error and r.data:
                     yield {"type": "plan_changed", "version": r.data.get("version")}
+                content = _cap(r.text)
+                if blocked and r.is_error:
+                    content = CONFIRMATION_DROPPED_NOTE + content
                 tool_results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": call.id,
-                        "content": _cap(r.text),
+                        "content": content,
                         "is_error": r.is_error,
                     }
                 )
