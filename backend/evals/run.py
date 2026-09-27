@@ -286,6 +286,11 @@ def print_table(results: list[Result]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Replies and details are Russian with «→» etc.; a Windows console (cp1251) would crash on
+    # print and lose the results table.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--base-url", required=True, help="e.g. https://gantt-ai-planner.duckdns.org"
