@@ -37,6 +37,7 @@ async def test_get_plan_and_find_tasks(app):
     tools = app.state.tool_client
     r = await tools.call("get_plan", {}, session_id=sid, turn_id=None)
     assert not r.is_error and "Следующий свободный id: 26" in r.text
+    assert r.text.startswith("Версия плана: 1\n")
     r = await tools.call("find_tasks", {"assignee": "дмитрий"}, session_id=sid, turn_id=None)
     found = r.data["result"]
     assert not r.is_error and 11 in [t["id"] for t in found]
@@ -120,3 +121,21 @@ async def test_resource_load_groups_assignees_case_insensitively(app):
     assert len(people) == 1
     assert {t["id"] for t in people[0]["tasks"]} == {a, b}
     assert people[0]["conflicts"] == [[a, b]]
+
+
+async def test_in_process_agent_may_omit_expected_version_but_it_is_checked_if_given(app):
+    # The agent's turn already holds the session (and its tools run under the plan lock), so the
+    # version is optional there; a wrong one is still refused.
+    sid = await new_sid(app)
+    tools = app.state.tool_client
+    turn = uuid.uuid4()
+    move = [{"op": "move_task", "id": 1, "shift_days": 1}]
+    r = await tools.call("apply_operations", {"operations": move}, session_id=sid, turn_id=turn)
+    assert not r.is_error and r.data["version"] == 2
+    r = await tools.call(
+        "apply_operations",
+        {"operations": move, "expected_version": 1},
+        session_id=sid,
+        turn_id=turn,
+    )
+    assert r.is_error and "version_conflict" in r.text

@@ -125,6 +125,9 @@ async def import_plan(
     request: Request,
     file: UploadFile,
     project_start: date = Form(...),
+    # The version the import replaces (required): 409 version_conflict if the plan has moved on
+    # meanwhile (another tab, the agent, MCP), checked under the plan lock when it is stored.
+    expected_version: int = Form(...),
     session_id: uuid.UUID = Depends(require_session),
 ) -> Response:
     settings = request.app.state.settings
@@ -146,6 +149,7 @@ async def import_plan(
         source="import",
         summary=f"Импорт {name}",
         chat_note=f"Загружен план «{name}», задач: {len(result.plan.tasks)}",
+        expected_version=expected_version,
     )
     ok = ImportSuccess(
         ok=True,

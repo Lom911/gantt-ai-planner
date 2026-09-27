@@ -121,10 +121,14 @@ async def test_imports_are_limited_per_ip(session_client, app):
     app.state.settings.import_limit_per_ip_hour = 1
     files = {"file": ("x.xlsx", b"not an xlsx")}
     first = await session_client.post(
-        "/api/plan/import", data={"project_start": "2026-09-21"}, files=files
+        "/api/plan/import",
+        data={"project_start": "2026-09-21", "expected_version": "1"},
+        files=files,
     )
     second = await session_client.post(
-        "/api/plan/import", data={"project_start": "2026-09-21"}, files=files
+        "/api/plan/import",
+        data={"project_start": "2026-09-21", "expected_version": "1"},
+        files=files,
     )
     assert first.status_code == 422 and second.status_code == 429
 

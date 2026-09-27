@@ -71,7 +71,11 @@ async def test_apply_operations_over_http_increments_version_and_publishes_mcp_e
 
     async with _mcp_client(app, token) as client:
         result = await client.call_tool(
-            "apply_operations", {"operations": [{"op": "move_task", "id": 1, "shift_days": 1}]}
+            "apply_operations",
+            {
+                "operations": [{"op": "move_task", "id": 1, "shift_days": 1}],
+                "expected_version": before.version,
+            },
         )
     assert not result.is_error, result.content
     assert result.structured_content["version"] == before.version + 1
@@ -95,12 +99,14 @@ async def test_external_mcp_mass_delete_needs_approval_in_the_browser(app, sessi
     ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
     async with _mcp_client(app, token) as client:
         refused = await client.call_tool(
-            "apply_operations", {"operations": ops}, raise_on_error=False
+            "apply_operations", {"operations": ops, "expected_version": 1}, raise_on_error=False
         )
         assert refused.is_error and "confirmation_required" in refused.content[0].text
         assert "веб-приложении" in refused.content[0].text
         early = await client.call_tool(
-            "apply_operations", {"operations": ops, "confirmed": True}, raise_on_error=False
+            "apply_operations",
+            {"operations": ops, "confirmed": True, "expected_version": 1},
+            raise_on_error=False,
         )
         assert early.is_error and "ещё не подтверждено" in early.content[0].text
 
@@ -112,7 +118,7 @@ async def test_external_mcp_mass_delete_needs_approval_in_the_browser(app, sessi
         assert approve.status_code == 200
 
         confirmed = await client.call_tool(
-            "apply_operations", {"operations": ops, "confirmed": True}
+            "apply_operations", {"operations": ops, "confirmed": True, "expected_version": 1}
         )
     assert not confirmed.is_error and confirmed.structured_content["version"] == 2
     assert len((await app.state.service.get_state(session_id)).plan.tasks) == 19
@@ -381,3 +387,35 @@ async def test_revoke_during_an_issue_also_revokes_the_new_token(app, session_cl
     issued = await issue
     assert issued.status_code == 200 and revoked.status_code == 204
     assert await _live_token_prefixes(app) == []
+
+
+async def test_external_edits_must_say_which_version_they_build_on(app, session_client):
+    # Optimistic concurrency for external clients: without expected_version an edit computed
+    # on a stale get_plan would silently overwrite what the user did in the browser meanwhile.
+    token = await _issue_token(session_client)
+    move = [{"op": "move_task", "id": 1, "shift_days": 1}]
+    async with _mcp_client(app, token) as client:
+        plan = await client.call_tool("get_plan", {})
+        assert "Версия плана: 1" in plan.content[0].text
+        task = await client.call_tool("get_task", {"id": 1})
+        assert task.structured_content["version"] == 1
+
+        missing = await client.call_tool(
+            "apply_operations", {"operations": move}, raise_on_error=False
+        )
+        assert missing.is_error and "expected_version" in missing.content[0].text
+        assert "get_plan" in missing.content[0].text
+        ok = await client.call_tool("apply_operations", {"operations": move, "expected_version": 1})
+        assert ok.structured_content["version"] == 2
+        stale = await client.call_tool(
+            "apply_operations", {"operations": move, "expected_version": 1}, raise_on_error=False
+        )
+        assert stale.is_error and "version_conflict" in stale.content[0].text
+        assert "текущая 2" in stale.content[0].text
+
+        no_version_undo = await client.call_tool("undo", {}, raise_on_error=False)
+        assert no_version_undo.is_error and "expected_version" in no_version_undo.content[0].text
+        stale_undo = await client.call_tool("undo", {"expected_version": 1}, raise_on_error=False)
+        assert stale_undo.is_error and "version_conflict" in stale_undo.content[0].text
+        undone = await client.call_tool("undo", {"expected_version": 2})
+        assert undone.structured_content["version"] == 1

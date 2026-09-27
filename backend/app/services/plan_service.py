@@ -542,11 +542,13 @@ class PlanService:
         source: Source,
         summary: str,
         chat_note: str | None = None,
+        expected_version: int | None = None,
     ) -> PlanState:
         await self._guard_busy(session_id, source)
         async with self.locks.lock(session_id), self.sessionmaker() as db, db.begin():
             await repo.lock_session_plan(db, session_id)
             version, current = await self._load(db, session_id)
+            self._check_version(expected_version, version)
             before, after = await asyncio.to_thread(lambda: (schedule(current), schedule(plan)))
             changes = diff_plans(before, after)
             await self._commit(
