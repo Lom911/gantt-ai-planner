@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+import anyio
+
 from app.agent.confirmation import is_explicit_confirmation
 from app.agent.llm import LLM, Completed, LLMError, LLMTurnResult, LLMUsage, TextDelta
 from app.agent.prompt import build_system
@@ -22,6 +24,7 @@ from app.mcp_server.client import PlanToolClient
 from app.services.plan_service import PlanService, PlanState
 
 trace_logger = logging.getLogger("app.agent.trace")
+logger = logging.getLogger("app.agent")
 _UNSAFE_LOG_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 MUTATING_TOOLS = {"apply_operations", "undo"}
@@ -131,7 +134,12 @@ class Agent:
         self._max_output_tokens = max_output_tokens
 
     async def run_turn(
-        self, session_id: uuid.UUID, user_text: str, *, turn_id: uuid.UUID | None = None
+        self,
+        session_id: uuid.UUID,
+        user_text: str,
+        *,
+        turn_id: uuid.UUID | None = None,
+        usage_id: int | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Run one agent turn for `user_text`.
 
@@ -142,6 +150,9 @@ class Agent:
         Direct callers that omit `turn_id` (e.g. tests, MCP-triggered turns) keep
         the old self-contained behavior: a fresh turn id is generated and the
         message is saved here.
+
+        `usage_id`: the chat_usage row the caller reserved for this message; the turn's
+        billed tokens are written to it when the turn ends, however it ends.
         """
         service = self._service
         message_already_saved = turn_id is not None
@@ -246,6 +257,19 @@ class Agent:
             finally:
                 service.bus.publish(session_id, {"type": "agent_status", "busy": False})
                 _trace(session_id, turn_id, stats, outcome, time.monotonic() - started)
+                if usage_id is not None and stats.usage.total:
+                    await self._record_tokens(usage_id, stats.usage.total)
+
+    async def _record_tokens(self, usage_id: int, tokens: int) -> None:
+        """Persist the turn's billed tokens (GET /api/ops/status sums them). Shielded: when the
+        client disconnects mid-turn the SSE response's cancel scope is already cancelled, and
+        an unshielded await here would be cancelled too — but those tokens were spent."""
+        try:
+            with anyio.CancelScope(shield=True), anyio.fail_after(5):
+                async with self._service.sessionmaker() as db, db.begin():
+                    await repo.set_chat_usage_tokens(db, usage_id, tokens)
+        except Exception:
+            logger.exception("could not record the tokens of a chat turn")
 
     async def _bounded(
         self,

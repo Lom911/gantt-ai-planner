@@ -14,7 +14,12 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.services.ops import RequestMetrics
+
 logger = logging.getLogger("app.access")
+# Not fed into the ops metrics: uptime probes and the alerting monitor's own polling would
+# dilute the error rate and the latency of real traffic.
+UNMETERED_PATHS = frozenset({"/healthz", "/api/ops/status"})
 
 Scope = dict[str, Any]
 Message = dict[str, Any]
@@ -39,11 +44,13 @@ class AccessLogMiddleware:
     """Pure-ASGI middleware: logs ``method path status duration_ms sid=<...>``.
 
     Never logs the query string, request/response bodies, cookies, headers,
-    prompts, or plan contents/names — only the four fields above.
+    prompts, or plan contents/names — only the four fields above. With `metrics`,
+    also feeds each request's status and duration into the ops status window.
     """
 
-    def __init__(self, app: App) -> None:
+    def __init__(self, app: App, metrics: RequestMetrics | None = None) -> None:
         self.app = app
+        self.metrics = metrics
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -52,16 +59,26 @@ class AccessLogMiddleware:
 
         start = time.monotonic()
         status_holder = {"status": 500}  # default if the app raises before responding
+        streaming = False
 
         async def send_wrapper(message: Message) -> None:
+            nonlocal streaming
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
+                streaming = any(
+                    name.lower() == b"content-type" and value.startswith(b"text/event-stream")
+                    for name, value in message.get("headers", [])
+                )
             await send(message)
 
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
             duration_ms = (time.monotonic() - start) * 1000
+            if self.metrics is not None and scope.get("path") not in UNMETERED_PATHS:
+                # An SSE stream lasts as long as the client stays: counted, but its duration
+                # isn't a response time.
+                self.metrics.record(status_holder["status"], None if streaming else duration_ms)
             logger.info(
                 "%s %s %s %.1f sid=%s",
                 scope.get("method", "-"),

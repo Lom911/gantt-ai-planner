@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     max_plan_json_bytes: int = 1_500_000
     static_dir: str | None = None
     log_level: str = "INFO"
+    # Bearer token for GET /api/ops/status (external alerting). Read like the other secrets
+    # (SECRETS_DIR file `ops_token`); unset or empty hides the endpoint (404).
+    ops_token: SecretStr | None = None
+    # Written by deploy/backup.sh after every nightly run; must be visible to the app (mounted
+    # read-only in production) for /api/ops/status to report the backup.
+    backup_status_file: str = "/var/lib/gantt-planner/backup-status"
 
     @property
     def sqlalchemy_url(self) -> str:

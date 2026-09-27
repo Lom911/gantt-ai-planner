@@ -226,6 +226,22 @@ async def count_chat_usage_since(db: AsyncSession, since: datetime) -> int:
     return int(await db.scalar(stmt) or 0)
 
 
+async def set_chat_usage_tokens(db: AsyncSession, usage_id: int, tokens: int) -> None:
+    await db.execute(update(ChatUsageRow).where(ChatUsageRow.id == usage_id).values(tokens=tokens))
+
+
+async def chat_usage_totals_since(db: AsyncSession, since: datetime) -> tuple[int, int]:
+    """(messages, billed LLM tokens) since `since`, app-wide."""
+    row = (
+        await db.execute(
+            select(func.count(), func.coalesce(func.sum(ChatUsageRow.tokens), 0)).where(
+                ChatUsageRow.created_at >= since
+            )
+        )
+    ).one()
+    return int(row[0]), int(row[1])
+
+
 async def prune_chat_usage(db: AsyncSession, older_than: datetime) -> None:
     await db.execute(delete(ChatUsageRow).where(ChatUsageRow.created_at < older_than))
 

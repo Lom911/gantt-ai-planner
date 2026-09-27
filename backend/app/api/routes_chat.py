@@ -55,7 +55,7 @@ async def chat(
         await repo.add_chat_message(
             db, session_id=session_id, role="user", content=user_text, turn_id=turn_id
         )
-        await repo.add_chat_usage(db)
+        usage_id = await repo.add_chat_usage(db)
     agent = request.app.state.agent
 
     async def gen() -> AsyncIterator[dict[str, str]]:
@@ -64,7 +64,8 @@ async def chat(
         # a bare `async for ... in agent.run_turn(...): yield` would leave that inner
         # generator to be closed only whenever it happens to be garbage-collected.
         try:
-            async with aclosing(agent.run_turn(session_id, user_text, turn_id=turn_id)) as turn:
+            turn_events = agent.run_turn(session_id, user_text, turn_id=turn_id, usage_id=usage_id)
+            async with aclosing(turn_events) as turn:
                 async for event in turn:
                     yield _sse(event)
         except AgentBusy as exc:
