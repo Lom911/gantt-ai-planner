@@ -122,12 +122,68 @@ step_compose_files() {
             echo "    installed $CADDY_DIR/$file"
         fi
     done
-    # The app is reachable only over 'planner-proxy': a Caddy stack that predates it
-    # would lose the site as soon as the app is recreated.
-    if ! grep -q 'planner-proxy' "$CADDY_DIR/compose.yml"; then
-        echo "    ACTION NEEDED: $CADDY_DIR/compose.yml does not attach Caddy to 'planner-proxy'." >&2
-        echo "    Add it (see deploy/caddy/compose.yml and docs/runbook.md) and recreate Caddy" >&2
-        echo "    BEFORE recreating the app, or gantt-ai-planner.duckdns.org answers 502." >&2
+    check_caddy_stack
+}
+
+# The app is reachable only through Caddy on 'planner-proxy', as `planner-app:8000`. A
+# shared Caddy stack that predates this setup (bootstrap never overwrites it) would lose
+# the site as soon as the app is recreated, so refuse to continue - fail closed - until
+# it is fixed, and print the exact fix.
+check_caddy_stack() {
+    echo "==> Checking the Caddy stack in $CADDY_DIR"
+    local config problems=0
+    if ! config="$(docker compose -f "$CADDY_DIR/compose.yml" config 2>&1)"; then
+        echo "    ABORT: 'docker compose -f $CADDY_DIR/compose.yml config' fails:" >&2
+        printf '%s\n' "$config" | sed 's/^/      /' >&2
+        exit 1
+    fi
+    # Normalized config: service networks are always a map (`      <key>: ...` under
+    # `    networks:`), and every top-level network has an explicit `name:` - so a network
+    # attached under another key but named planner-proxy counts too.
+    if ! printf '%s\n' "$config" | awk '
+        /^[^ ]/ { section = $1; in_nets = 0; next }
+        section == "services:" && /^  [^ ]/ { in_nets = 0 }
+        section == "services:" && /^    [^ ]/ { in_nets = ($1 == "networks:") }
+        section == "services:" && in_nets && /^      [^ -]/ { k = $1; sub(/:$/, "", k); used[k] = 1 }
+        section == "networks:" && /^  [^ ]/ { cur = $1; sub(/:$/, "", cur) }
+        section == "networks:" && /^    name: / { name[cur] = $2 }
+        END { for (k in used) if (name[k] == "planner-proxy") found = 1; exit !found }'; then
+        problems=1
+        cat >&2 <<EOF
+    ABORT: no service in $CADDY_DIR/compose.yml is attached to the 'planner-proxy' network,
+    so Caddy cannot reach the app (gantt-ai-planner.duckdns.org would answer 502).
+    Fix: add to $CADDY_DIR/compose.yml (keep everything else as it is):
+
+        networks:
+          planner-proxy:
+            external: true
+        services:
+          caddy:
+            networks:
+              - planner-proxy     # in addition to the networks it already has
+
+    then recreate Caddy (a few seconds of downtime for every site on this host) and re-run:
+        docker network inspect planner-proxy >/dev/null 2>&1 || docker network create --internal planner-proxy
+        cd $CADDY_DIR && docker compose config -q && docker compose up -d
+EOF
+    fi
+    if ! grep -Eq '^[[:space:]]*reverse_proxy[[:space:]]+(http://)?planner-app:8000([[:space:]{]|$)' "$CADDY_DIR/Caddyfile"; then
+        problems=1
+        cat >&2 <<EOF
+    ABORT: $CADDY_DIR/Caddyfile has no 'reverse_proxy planner-app:8000' line, so no site
+    sends traffic to the app. Fix: add the gantt-ai-planner.duckdns.org site block from
+    deploy/caddy/Caddyfile (keep the other sites), then restart Caddy (admin API is off;
+    a few seconds of downtime for every site on this host) and re-run:
+        cd $CADDY_DIR && docker compose run --rm --no-deps caddy caddy validate \\
+            --config /etc/caddy/Caddyfile --adapter caddyfile && docker compose restart caddy
+EOF
+    fi
+    [ "$problems" -eq 0 ] || exit 1
+    echo "    Caddy is attached to 'planner-proxy' and proxies to planner-app:8000"
+    if ! printf '%s\n' "$config" | grep -q '^    read_only: true$'; then
+        echo "    NOTE: Caddy runs without the hardening from deploy/caddy/compose.yml (read_only,"
+        echo "    cap_drop ALL + NET_BIND_SERVICE, no-new-privileges, pids_limit); merge it by hand"
+        echo "    (docs/runbook.md section 1, 'Существующий стек Caddy')."
     fi
 }
 

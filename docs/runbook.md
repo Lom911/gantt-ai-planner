@@ -57,7 +57,10 @@
      `/opt/caddy`;
    - копирует `compose.prod.yml`, `initdb/10-roles.sh`, конфиг Caddy
      (существующие `/opt/caddy/compose.yml` и `Caddyfile` не
-     перезаписывает — см. «Существующий стек Caddy» ниже);
+     перезаписывает — см. «Существующий стек Caddy» ниже) и **прерывается
+     с кодом 1**, если стек Caddy не подключён к сети `planner-proxy` или в
+     `Caddyfile` нет `reverse_proxy planner-app:8000` (печатает, что именно
+     добавить); если Caddy запущен без hardening'а — только предупреждает;
    - создаёт `/opt/gantt-planner/.env` (если его нет) с `LLM_PROVIDER` и
      `LLM_MODEL`, **без `IMAGE_TAG`**: тег первого релиза задаётся явно в
      п. 4, до этого `docker compose` для этого стека падает с
@@ -141,10 +144,14 @@
 ### Существующий стек Caddy (общий с другими сайтами)
 
 `bootstrap.sh` никогда не перезаписывает `/opt/caddy/compose.yml` и
-`Caddyfile` (там могут быть другие сайты). Если стек Caddy появился
-раньше сети `planner-proxy`, bootstrap печатает `ACTION NEEDED`, и Caddy
-нужно подключить к ней руками — **до** пересоздания контейнера `app`
-(иначе сайт отвечает 502, пока Caddy не увидит приложение):
+`Caddyfile` (там могут быть другие сайты). Зато проверяет их по
+нормализованному `docker compose config` и **останавливается (fail
+closed)**, если ни один сервис стека не подключён к сети
+`planner-proxy` (по ключу или по `name:`) или в `Caddyfile` нет строки
+`reverse_proxy planner-app:8000` — иначе при пересоздании `app` сайт
+ответит 502. Сообщение `ABORT: …` содержит точное исправление; после
+него bootstrap запускается заново. Подключить Caddy к сети нужно **до**
+пересоздания контейнера `app`:
 
 ```yaml
 # /opt/caddy/compose.yml — добавить (остальное не трогать)
@@ -165,8 +172,42 @@ cd /opt/caddy && docker compose config -q && docker compose up -d   # перес
 docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$(docker compose ps -q caddy)"   # edge planner-proxy
 ```
 
-`Caddyfile` менять не нужно: `reverse_proxy planner-app:8000` находит
-приложение по алиасу в `planner-proxy`.
+`Caddyfile` менять не нужно, если в нём уже есть блок
+`gantt-ai-planner.duckdns.org` из `deploy/caddy/Caddyfile`:
+`reverse_proxy planner-app:8000` находит приложение по алиасу в
+`planner-proxy`.
+
+**Hardening Caddy.** `deploy/caddy/compose.yml` запускает Caddy (единственный
+контейнер этой схемы, смотрящий в интернет) с `read_only: true` (корневая
+ФС только для чтения; писать можно в тома `caddy_data` — сертификаты и
+состояние ACME — и `caddy_config`, плюс `tmpfs` в `/tmp`),
+`cap_drop: [ALL]` + `cap_add: [NET_BIND_SERVICE]` (только привязка к
+80/443), `security_opt: [no-new-privileges:true]` и `pids_limit: 128`.
+Проверено локально на том же образе (`caddy:2@sha256:0c99…`): Caddy
+стартует, в процессе остаётся только `CAP_NET_BIND_SERVICE`, отдаёт HTTP,
+выпускает сертификат `tls internal` и пишет CA и сертификат в том данных
+(тот же путь хранения, что у ACME), сертификат переживает пересоздание
+контейнера, запись в корневую ФС отклоняется, боевой `Caddyfile` проходит
+`caddy validate`. Саму выдачу сертификата Let's Encrypt (HTTP-01) офлайн
+не проверить — после включения на проде смотреть
+`docker compose logs caddy` на ошибки `obtaining certificate` при
+следующем продлении. На существующем общем стеке эти ключи вносятся в
+`/opt/caddy/compose.yml` руками (bootstrap файл не трогает и только
+напоминает `NOTE: Caddy runs without the hardening`):
+
+```bash
+cd /opt/caddy
+cp compose.yml compose.yml.bak-$(date +%F)
+# добавить в сервис caddy ключи read_only / tmpfs / cap_drop / cap_add /
+# security_opt / pids_limit из deploy/caddy/compose.yml, затем:
+docker compose config -q && docker compose up -d     # пересоздаст caddy: пауза в несколько секунд для всех сайтов хоста
+docker compose ps caddy && docker compose logs --tail 50 caddy
+curl -fsS https://gantt-ai-planner.duckdns.org/healthz
+```
+
+Если после пересоздания Caddy не стартует или какой-то сайт перестал
+открываться (например, другой сайт хоста пишет на диск вне `/data`,
+`/config`, `/tmp`) — вернуть `compose.yml.bak-…` и `docker compose up -d`.
 
 ## 2. Регулярный деплой
 
