@@ -1,8 +1,11 @@
-"""In-memory per-client-IP sliding-window limits.
+"""In-memory per-client-IP sliding-window limits, and the client address used by all limits.
 
-Kept in process memory, like the event bus and the session locks: the app runs a single
-worker (see README), and a limit that resets on restart is fine for its purpose — stopping
-one client from creating sessions or burning the shared daily chat quota in bulk.
+Only the high-frequency limits stay in process memory: plan mutations and the /mcp endpoint.
+They are cheap to check and bounded by other caps anyway (plan size, max_versions per session,
+the MCP token lookup), and a database write on every edit or MCP request would cost more than
+the limit protects. The app runs a single worker (see README), so one table is the whole
+picture; resetting on restart is acceptable for them. The costly actions — new sessions, chat
+messages, Excel imports — are limited durably in Postgres (app.services.ratelimit).
 """
 
 import ipaddress

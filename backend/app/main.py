@@ -149,11 +149,8 @@ def create_app(
         app.state.sessionmaker = sm
         app.state.service = service
         app.state.mcp = mcp
-        app.state.session_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
-        app.state.chat_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
-        app.state.chat_ip_day_limiter = SlidingWindowLimiter(window_seconds=86400)
+        # Sessions, chat and imports are limited in Postgres (app.services.ratelimit).
         app.state.mutation_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
-        app.state.import_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
         cleanup_task = asyncio.create_task(_cleanup_loop(app, cfg))
         try:
             async with PlanToolClient(mcp) as tool_client:

@@ -2,7 +2,8 @@ import uuid
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import (
@@ -11,6 +12,7 @@ from app.db.models import (
     McpTokenRow,
     PlanConfirmationRow,
     PlanVersionRow,
+    RateCounterRow,
     SessionRow,
 )
 
@@ -212,9 +214,11 @@ async def recent_chat_messages(
     return list(reversed(rows.all()))
 
 
-async def add_chat_usage(db: AsyncSession) -> None:
-    db.add(ChatUsageRow())
+async def add_chat_usage(db: AsyncSession) -> int:
+    row = ChatUsageRow()
+    db.add(row)
     await db.flush()
+    return row.id
 
 
 async def count_chat_usage_since(db: AsyncSession, since: datetime) -> int:
@@ -224,6 +228,35 @@ async def count_chat_usage_since(db: AsyncSession, since: datetime) -> int:
 
 async def prune_chat_usage(db: AsyncSession, older_than: datetime) -> None:
     await db.execute(delete(ChatUsageRow).where(ChatUsageRow.created_at < older_than))
+
+
+async def bump_rate_counter(db: AsyncSession, key: str, window_start: datetime) -> int:
+    """+1 on the (key, window) counter, created at 1; returns the new count. The row lock the
+    upsert takes serializes concurrent hits on one key until the transaction ends."""
+    stmt = (
+        insert(RateCounterRow)
+        .values(key=key, window_start=window_start, count=1)
+        .on_conflict_do_update(
+            index_elements=[RateCounterRow.key, RateCounterRow.window_start],
+            set_={"count": RateCounterRow.count + 1},
+        )
+        .returning(RateCounterRow.count)
+    )
+    return int((await db.execute(stmt)).scalar_one())
+
+
+async def prune_rate_counters(
+    db: AsyncSession, *, hour_windows_before: datetime, day_windows_before: datetime
+) -> None:
+    await db.execute(
+        delete(RateCounterRow).where(
+            or_(
+                RateCounterRow.window_start < day_windows_before,
+                RateCounterRow.key.startswith("hour:")
+                & (RateCounterRow.window_start < hour_windows_before),
+            )
+        )
+    )
 
 
 async def count_user_messages_since(

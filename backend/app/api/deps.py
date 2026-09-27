@@ -6,6 +6,7 @@ from app.config import Settings
 from app.services.errors import BadOrigin, NoSession, RateLimited
 from app.services.iplimit import client_key
 from app.services.plan_service import PlanService
+from app.services.ratelimit import enforce
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 
@@ -64,6 +65,7 @@ def client_ip(request: Request) -> str:
 
 
 def limit_mutations(request: Request) -> None:
+    # In memory on purpose (see app.services.iplimit): the cheap, high-frequency one.
     settings = request.app.state.settings
     if not request.app.state.mutation_ip_limiter.allow(
         client_ip(request), settings.mutation_limit_per_ip_hour
@@ -71,12 +73,18 @@ def limit_mutations(request: Request) -> None:
         raise RateLimited("Слишком много изменений плана с вашего адреса. Попробуйте позже.")
 
 
-def limit_imports(request: Request) -> None:
+async def limit_imports(request: Request) -> None:
+    # Durable (app.services.ratelimit): an import parses up to a 2 MB workbook.
     settings = request.app.state.settings
-    if not request.app.state.import_ip_limiter.allow(
-        client_ip(request), settings.import_limit_per_ip_hour
-    ):
-        raise RateLimited("Слишком много загрузок Excel с вашего адреса. Попробуйте позже.")
+    async with get_service(request).sessionmaker() as db, db.begin():
+        await enforce(
+            db,
+            "import",
+            client_ip(request),
+            "hour",
+            settings.import_limit_per_ip_hour,
+            "Слишком много загрузок Excel с вашего адреса. Попробуйте позже.",
+        )
 
 
 def check_origin(request: Request) -> None:

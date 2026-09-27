@@ -36,16 +36,23 @@ class Settings(BaseSettings):
     # `turn_budget_exceeded` (app.agent.loop).
     llm_turn_token_budget: int = 300_000
 
-    chat_limit_per_hour: int = 30
-    chat_limit_per_day: int = 500
-    # Per client IP (in-memory, sliding hour): new sessions and chat messages across sessions.
+    chat_limit_per_hour: int = 30  # per session, sliding hour
+    chat_limit_per_day: int = 500  # app-wide, last 24 hours (chat_usage)
+    # Of chat_limit_per_day, the last chat_daily_reserve messages are kept for addresses that
+    # have sent fewer than chat_reserve_per_ip_day messages today: a few heavy clients can't
+    # use up the quota for everyone else.
+    chat_daily_reserve: int = 100
+    chat_reserve_per_ip_day: int = 10
+    # Per client IP, in Postgres (fixed windows: the clock hour, the UTC day; they survive a
+    # restart): new sessions and chat messages across sessions.
     session_limit_per_ip_hour: int = 20
     chat_limit_per_ip_hour: int = 60
-    # Sliding 24 h: without it a handful of addresses at the hourly cap could use up the whole
+    # Per day: without it a handful of addresses at the hourly cap could use up the whole
     # app-wide chat_limit_per_day on their own.
     chat_limit_per_ip_day: int = 150
-    # Per client IP: plan mutations (operations/undo/redo/reset) and Excel imports. Each one
-    # stores a full plan snapshot, so unbounded bursts from one client would grow the database.
+    # Per client IP: plan mutations (operations/undo/redo/reset, in memory) and Excel imports
+    # (in Postgres). Each one stores a full plan snapshot, so unbounded bursts from one client
+    # would grow the database.
     mutation_limit_per_ip_hour: int = 1200
     import_limit_per_ip_hour: int = 60
     # Per client IP: every request to the external /mcp endpoint, authenticated or not (each
