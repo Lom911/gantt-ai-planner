@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_max_tokens: int = 4096
     # Billed tokens (input + output + cache writes + cache reads) one chat turn may spend over
-    # all its LLM calls; past it the turn stops with `turn_budget_exceeded`.
+    # all its LLM calls. A ceiling: a call is sent only if its estimated input plus a minimum
+    # answer still fits, with max_tokens capped to the rest; otherwise the turn stops with
+    # `turn_budget_exceeded` (app.agent.loop).
     llm_turn_token_budget: int = 300_000
 
     chat_limit_per_hour: int = 30

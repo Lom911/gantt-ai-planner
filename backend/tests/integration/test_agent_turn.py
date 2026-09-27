@@ -75,7 +75,7 @@ async def test_turn_persists_chat_and_clears_busy(app):
 
 async def test_iteration_cap(app):
     class Looping:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             call = LLMToolCall(id=f"x{len(messages)}", name="get_plan", input={})
             yield Completed(
                 LLMTurnResult(
@@ -97,7 +97,7 @@ async def test_iteration_cap(app):
 
 async def test_llm_error_is_reported(app):
     class Broken:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             raise LLMError("llm_unavailable", "LLM временно недоступна, попробуйте позже")
             yield  # pragma: no cover
 
@@ -114,7 +114,7 @@ async def test_llm_error_is_reported(app):
 
 async def test_llm_error_after_partial_text_persists_error_not_partial(app):
     class PartialThenBroken:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             yield TextDelta("Сейчас перене")
             raise LLMError("llm_unavailable", "LLM временно недоступна, попробуйте позже")
 
@@ -140,7 +140,7 @@ async def test_llm_error_after_partial_text_persists_error_not_partial(app):
 
 async def test_text_from_separate_iterations_is_separated(app):
     class TalksAroundToolCall:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             if len(messages) == 1:
                 yield TextDelta("Смотрю план.")
                 call = LLMToolCall(id="t1", name="get_plan", input={})
@@ -195,7 +195,7 @@ async def test_large_tool_results_are_truncated_before_going_back_to_the_llm(app
     seen: list[str] = []
 
     class ReadsPlanTwice:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             last = messages[-1]["content"]
             if isinstance(last, list):
                 seen.append(last[0]["content"])
@@ -250,51 +250,97 @@ def _final_turn(text, usage=None):
     )
 
 
-async def test_turn_stops_once_real_token_usage_is_over_the_budget(app):
-    # Security audit M1: the iteration cap alone doesn't bound the cost — one iteration on a big
-    # plan can be tens of thousands of tokens. Every billed kind counts, cache reads included.
-    per_call = LLMUsage(
-        input_tokens=50,
-        output_tokens=10,
-        cache_creation_input_tokens=20,
-        cache_read_input_tokens=20,
+class WorstCaseBiller:
+    """Bills every call its full estimated input and every output token it was allowed, and
+    keeps asking for get_plan: the most a turn can cost within the loop's own accounting."""
+
+    def __init__(self):
+        self.calls = []  # (estimated input, max_tokens) per call
+
+    async def stream(self, *, system, tools, messages, max_tokens=None):
+        from app.agent.loop import estimate_input_tokens
+
+        estimate = estimate_input_tokens(system, tools, messages)
+        self.calls.append((estimate, max_tokens))
+        usage = LLMUsage(input_tokens=estimate, output_tokens=max_tokens)
+        yield Completed(_tool_turn(f"g{len(messages)}", "get_plan", {}, usage))
+
+
+async def test_turn_token_budget_is_a_ceiling(app):
+    # Security audit M1 follow-up: the budget used to be checked only after a call returned,
+    # so the call that crossed it was already paid for (and could be arbitrarily large). Now a
+    # call is sent only if its estimated input plus a minimum answer still fits, and its
+    # max_tokens is capped to what is left.
+    from app.agent.loop import MIN_OUTPUT_TOKENS
+
+    def agent_for(llm, **kw):
+        return Agent(
+            llm,
+            app.state.tool_client,
+            app.state.service,
+            today=lambda: TODAY,
+            max_output_tokens=2000,
+            **kw,
+        )
+
+    probe = WorstCaseBiller()  # the same turn with room to spare: what each call would cost
+    await collect(agent_for(probe, max_iterations=2), await new_sid(app), "покажи план")
+    (first, _), (second, _) = probe.calls
+    budget = first + 2000 + second + 1500  # room for a full first call and a capped second one
+
+    llm = WorstCaseBiller()
+    sid = await new_sid(app)
+    events = await collect(agent_for(llm, turn_token_budget=budget), sid, "покажи план")
+    assert events[-1]["type"] == "error" and events[-1]["code"] == "turn_budget_exceeded"
+    assert "сузьте" in events[-1]["message"]
+    assert llm.calls == [(first, 2000), (second, 1500)]  # the second call's answer was capped
+    assert sum(estimate + cap for estimate, cap in llm.calls) <= budget
+    assert all(cap >= MIN_OUTPUT_TOKENS for _, cap in llm.calls)
+    assert not app.state.service.locks.is_busy(sid)
+
+
+async def test_turn_that_cannot_afford_even_one_call_sends_nothing(app):
+    llm = WorstCaseBiller()
+    agent = Agent(
+        llm, app.state.tool_client, app.state.service, today=lambda: TODAY, turn_token_budget=500
     )
+    events = await collect(agent, await new_sid(app), "покажи план")
+    assert events[-1]["code"] == "turn_budget_exceeded"
+    assert llm.calls == []
+
+
+async def test_billed_usage_over_the_budget_still_stops_before_tools(app):
+    # The estimate is a heuristic: if a response turns out to have cost more than the budget
+    # allows, its tool calls are not run (no half-done edit behind an error message).
     calls = []
 
-    class ReadsThenEdits:
-        async def stream(self, *, system, tools, messages):
-            calls.append(len(messages))
-            if len(calls) == 1:
-                yield Completed(_tool_turn("g1", "get_plan", {}, per_call))
-            else:
-                op = {"op": "update_task", "id": 1, "duration": 9}
-                args = {"operations": [op]}
-                yield Completed(_tool_turn("a1", "apply_operations", args, per_call))
+    class UnderEstimated:
+        async def stream(self, *, system, tools, messages, max_tokens=None):
+            calls.append(max_tokens)
+            op = {"op": "update_task", "id": 1, "duration": 9}
+            usage = LLMUsage(input_tokens=90_000, output_tokens=20_000)
+            yield Completed(_tool_turn("a1", "apply_operations", {"operations": [op]}, usage))
 
     sid = await new_sid(app)
-    # 2 calls = 200 tokens > 170; without the cache reads it would be 160 and pass.
     agent = Agent(
-        ReadsThenEdits(),
+        UnderEstimated(),
         app.state.tool_client,
         app.state.service,
         today=lambda: TODAY,
-        turn_token_budget=170,
+        turn_token_budget=100_000,
     )
     events = await collect(agent, sid, "поменяй что-нибудь")
-    assert events[-1]["type"] == "error" and events[-1]["code"] == "turn_budget_exceeded"
-    assert "сузьте" in events[-1]["message"]
-    assert len(calls) == 2
-    # The over-budget call's tool calls are not executed.
-    assert [e["name"] for e in events if e["type"] == "tool_started"] == ["get_plan"]
+    assert events[-1]["code"] == "turn_budget_exceeded"
+    assert len(calls) == 1
+    assert [e for e in events if e["type"] == "tool_started"] == []
     assert (await app.state.service.get_state(sid)).version == 1
-    assert not app.state.service.locks.is_busy(sid)
 
 
 async def test_a_final_answer_over_the_budget_still_completes_the_turn(app):
     class OneExpensiveAnswer:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             yield TextDelta("Готово.")
-            yield Completed(_final_turn("Готово.", LLMUsage(input_tokens=10_000)))
+            yield Completed(_final_turn("Готово.", LLMUsage(input_tokens=200_000)))
 
     sid = await new_sid(app)
     agent = Agent(
@@ -302,10 +348,14 @@ async def test_a_final_answer_over_the_budget_still_completes_the_turn(app):
         app.state.tool_client,
         app.state.service,
         today=lambda: TODAY,
-        turn_token_budget=100,
+        turn_token_budget=100_000,
     )
     events = await collect(agent, sid, "привет")
     assert events[-1]["type"] == "done"
+
+
+async def test_max_output_tokens_comes_from_settings(app):
+    assert app.state.agent._max_output_tokens == app.state.settings.llm_max_tokens
 
 
 async def test_turn_token_budget_comes_from_settings(app):
@@ -336,7 +386,7 @@ async def test_each_turn_logs_one_trace_line_without_content(app, caplog):
 
 async def test_trace_line_sums_tokens_and_names_the_error(app, caplog):
     class Looping:
-        async def stream(self, *, system, tools, messages):
+        async def stream(self, *, system, tools, messages, max_tokens=None):
             usage = LLMUsage(input_tokens=100, output_tokens=5, cache_read_input_tokens=1000)
             yield Completed(_tool_turn(f"x{len(messages)}", "get_plan", {}, usage))
 
@@ -367,7 +417,7 @@ class MassDeleter:
     def __init__(self):
         self.tool_results = []
 
-    async def stream(self, *, system, tools, messages):
+    async def stream(self, *, system, tools, messages, max_tokens=None):
         last = messages[-1]["content"]
         if isinstance(last, list):
             self.tool_results.append(last[0]["content"])

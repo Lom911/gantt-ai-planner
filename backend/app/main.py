@@ -164,6 +164,7 @@ def create_app(
                     service,
                     today=today_fn,
                     turn_token_budget=cfg.llm_turn_token_budget,
+                    max_output_tokens=cfg.llm_max_tokens,
                 )
                 yield
         finally:
