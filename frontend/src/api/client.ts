@@ -5,6 +5,7 @@ import type {
   ImportSuccess,
   McpTokenResponse,
   McpTokenStatus,
+  PendingConfirmation,
   MetaResponse,
   Operation,
   PlanResponse,
@@ -115,10 +116,20 @@ export const api = {
   mcpTokenStatus: () => request<McpTokenStatus>("/api/mcp-token"),
   createMcpToken: () => post<McpTokenResponse>("/api/mcp-token"),
   revokeMcpToken: () => request<void>("/api/mcp-token", { method: "DELETE" }),
-  async importPlan(file: File, projectStart: string): Promise<ImportSuccess | ImportFailure> {
+  pendingConfirmation: () => request<PendingConfirmation | null>("/api/plan/confirmation"),
+  approveConfirmation: (id: string) => post<unknown>(`/api/plan/confirmation/${encodeURIComponent(id)}/approve`),
+  rejectConfirmation: (id: string) => post<unknown>(`/api/plan/confirmation/${encodeURIComponent(id)}/reject`),
+  async importPlan(
+    file: File,
+    projectStart: string,
+    expectedVersion?: number,
+  ): Promise<ImportSuccess | ImportFailure> {
     const form = new FormData();
     form.append("file", file);
     form.append("project_start", projectStart);
+    // The version the user was looking at: if the plan moved on meanwhile (another tab, the
+    // agent, MCP), the server refuses with 409 instead of silently replacing the newer plan.
+    if (expectedVersion != null) form.append("expected_version", String(expectedVersion));
     const send = () => apiFetch("/api/plan/import", { method: "POST", body: form });
     let res = await send();
     if (res.status === 401) {

@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
 import type { ImportIssue } from "@/api/types";
-import { PLAN_KEY } from "@/hooks/usePlan";
+import { cachedPlanVersion, PLAN_KEY, refetchOnConflict } from "@/hooks/usePlan";
 import { CHAT_HISTORY_KEY } from "@/hooks/useChat";
 import { nextMonday, toISODate } from "@/lib/dates";
 import { uploadSizeError } from "@/lib/upload";
@@ -47,7 +47,7 @@ export function ImportDialog({ open, onOpenChange }: { open: boolean; onOpenChan
     setLoading(true);
     setGeneralError(null);
     try {
-      const result = await api.importPlan(file, projectStart);
+      const result = await api.importPlan(file, projectStart, cachedPlanVersion(queryClient));
       if (!result.ok) {
         setErrors(result.errors);
         setWarnings(result.warnings);
@@ -64,6 +64,12 @@ export function ImportDialog({ open, onOpenChange }: { open: boolean; onOpenChan
       reset();
       onOpenChange(false);
     } catch (err) {
+      if (refetchOnConflict(queryClient, err)) {
+        setGeneralError(
+          "План только что изменился (в другой вкладке, в чате или через MCP), поэтому загрузка отменена. Нажмите «Загрузить» ещё раз.",
+        );
+        return;
+      }
       setGeneralError(err instanceof ApiError ? err.message : "Не удалось загрузить файл");
     } finally {
       setLoading(false);

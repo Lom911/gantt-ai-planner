@@ -216,6 +216,17 @@ export interface McpTokenStatus {
   last_used_at: string | null;
 }
 
+// GET /api/plan/confirmation: a mass deletion waiting for the user's approval. "mcp" ones come
+// from an external MCP client and can only be approved here, in the app (the trusted side).
+export interface PendingConfirmation {
+  id: string;
+  origin: "agent" | "mcp";
+  summary: string;
+  count: number;
+  expires_at: string;
+  approved: boolean;
+}
+
 export type VersionSource = "seed" | "import" | "user" | "agent" | "mcp" | "reset";
 
 // GET /api/plan/tasks/{id}/history (spec §10, §6: "вычисляется из diff сохранённых версий") —
