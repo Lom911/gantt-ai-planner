@@ -12,9 +12,10 @@ import sys
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from app.services.ops import RequestMetrics
+if TYPE_CHECKING:  # annotation only: keeps this low-level module free of app imports
+    from app.services.ops import RequestMetrics
 
 logger = logging.getLogger("app.access")
 # Not fed into the ops metrics: uptime probes and the alerting monitor's own polling would
@@ -48,7 +49,7 @@ class AccessLogMiddleware:
     also feeds each request's status and duration into the ops status window.
     """
 
-    def __init__(self, app: App, metrics: RequestMetrics | None = None) -> None:
+    def __init__(self, app: App, metrics: "RequestMetrics | None" = None) -> None:
         self.app = app
         self.metrics = metrics
 
