@@ -45,6 +45,7 @@ async def create_mcp_token(
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=TOKEN_TTL_DAYS)
     async with service.sessionmaker() as db, db.begin():
+        await repo.lock_session_mcp_tokens(db, session_id)
         await repo.revoke_mcp_tokens(db, session_id, now)
         await repo.create_mcp_token(
             db,
@@ -80,4 +81,5 @@ async def revoke_mcp_token(
     service = get_service(request)
     now = datetime.now(UTC)
     async with service.sessionmaker() as db, db.begin():
+        await repo.lock_session_mcp_tokens(db, session_id)
         await repo.revoke_mcp_tokens(db, session_id, now)

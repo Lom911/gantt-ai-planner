@@ -276,6 +276,18 @@ async def latest_mcp_token(db: AsyncSession, session_id: uuid.UUID) -> McpTokenR
     )
 
 
+async def lock_session_mcp_tokens(db: AsyncSession, session_id: uuid.UUID) -> None:
+    """Serializes issuing and revoking one session's MCP token (transaction-scoped, like
+    lock_session_plan, and on a key of its own so it never waits for a plan edit). Without it
+    two issues could both revoke before either inserted (two live tokens, or a unique violation
+    now that the index forbids that), and a revoke racing an issue skipped the token being
+    inserted: its UPDATE waited for the old token's row lock and never saw the new row."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended('mcp-token:' || :sid, 0))"),
+        {"sid": str(session_id)},
+    )
+
+
 async def revoke_mcp_tokens(db: AsyncSession, session_id: uuid.UUID, now: datetime) -> None:
     await db.execute(
         update(McpTokenRow)

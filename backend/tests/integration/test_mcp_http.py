@@ -300,3 +300,67 @@ async def test_mcp_activity_is_written_at_most_every_ten_minutes(app, session_cl
         await client.call_tool("get_plan", {})
     token_age, session_age = await _activity_ages(app)
     assert token_age < 10 and session_age < 10  # stale: touched
+
+
+async def _live_token_prefixes(app: Any) -> list[str]:
+    from sqlalchemy import text
+
+    async with app.state.sessionmaker() as db:
+        rows = await db.execute(text("SELECT prefix FROM mcp_tokens WHERE revoked_at IS NULL"))
+    return list(rows.scalars().all())
+
+
+def _slow_revoke(monkeypatch: Any) -> asyncio.Event:
+    """Widen the window between «revoke the old tokens» and «insert the new one», so two
+    unserialized requests would both revoke before either inserts. The returned event is set
+    once a revoke has run (its transaction still open)."""
+    from app.db import repo
+
+    real = repo.revoke_mcp_tokens
+    revoking = asyncio.Event()
+
+    async def slow(db: Any, session_id: Any, now: Any) -> None:
+        await real(db, session_id, now)
+        revoking.set()
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(repo, "revoke_mcp_tokens", slow)
+    return revoking
+
+
+async def _warm_pool(app: Any, n: int = 4) -> None:
+    """Pooled connections ready, so no racer is delayed by opening one (which lets the other
+    finish first and hides the race)."""
+    from sqlalchemy import text
+
+    dbs = [app.state.sessionmaker() for _ in range(n)]
+    await asyncio.gather(*(db.execute(text("SELECT 1")) for db in dbs))
+    for db in dbs:
+        await db.close()
+
+
+async def test_concurrent_token_issues_leave_exactly_one_live_token(
+    app, session_client, monkeypatch
+):
+    await _warm_pool(app)
+    _slow_revoke(monkeypatch)
+    responses = await asyncio.gather(*(session_client.post("/api/mcp-token") for _ in range(3)))
+    assert [r.status_code for r in responses] == [200, 200, 200]
+    live = await _live_token_prefixes(app)
+    assert len(live) == 1
+    assert live[0] in {r.json()["token"][:12] for r in responses}
+
+
+async def test_revoke_during_an_issue_also_revokes_the_new_token(app, session_client, monkeypatch):
+    # Unserialized, the revoke's UPDATE waited on the old token's row lock, then skipped the
+    # token the issue had just inserted (not in its snapshot): «Отключить» answered 204 while
+    # a live token remained.
+    await _issue_token(session_client)
+    await _warm_pool(app)
+    revoking = _slow_revoke(monkeypatch)
+    issue = asyncio.create_task(session_client.post("/api/mcp-token"))
+    await revoking.wait()  # the issue is inside its transaction
+    revoked = await session_client.delete("/api/mcp-token")
+    issued = await issue
+    assert issued.status_code == 200 and revoked.status_code == 204
+    assert await _live_token_prefixes(app) == []
