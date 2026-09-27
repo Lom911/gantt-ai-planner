@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
 import { formatRuDateTime } from "@/lib/dates";
+import { historySafeCommand } from "@/lib/mcpCommands";
 import type { McpTokenResponse } from "@/api/types";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 
@@ -157,6 +158,25 @@ export function McpConnectDialog({
                     type="button"
                     className="shrink-0 self-start rounded-md border border-input px-2 py-1 text-sm hover:bg-accent"
                     onClick={() => void copyToClipboard(issued.claude_code_command, "Команда")}
+                  >
+                    Копировать
+                  </button>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  Команда содержит токен и попадёт в историю оболочки. В bash/zsh без записи в историю:
+                </span>
+                <div className="flex gap-2">
+                  <textarea
+                    readOnly
+                    rows={2}
+                    value={historySafeCommand(issued.url)}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="flex-1 resize-none rounded-md border border-input bg-background px-2 py-1 font-mono text-xs"
+                  />
+                  <button
+                    type="button"
+                    className="shrink-0 self-start rounded-md border border-input px-2 py-1 text-sm hover:bg-accent"
+                    onClick={() => void copyToClipboard(historySafeCommand(issued.url), "Команда")}
                   >
                     Копировать
                   </button>
