@@ -121,7 +121,21 @@ step_dirs() {
 }
 
 step_compose_files() {
-    echo "==> Installing compose files, initdb script and Caddy config"
+    # The Caddy stack may be shared with other sites on this host: never overwrite an existing
+    # Caddyfile/compose.yml (a re-run would silently drop the other sites) — only create them.
+    # Checked BEFORE anything of the app stack changes: an abort leaves it as it was.
+    echo "==> Installing the Caddy config (only if missing)"
+    for file in compose.yml Caddyfile; do
+        if [ -f "$CADDY_DIR/$file" ]; then
+            echo "    $CADDY_DIR/$file already exists, leaving it untouched (merge deploy/caddy/$file by hand if needed)"
+        else
+            install -m 0644 -o root -g root "$SCRIPT_DIR/caddy/$file" "$CADDY_DIR/$file"
+            echo "    installed $CADDY_DIR/$file"
+        fi
+    done
+    check_caddy_stack
+
+    echo "==> Installing compose files and initdb script"
     install -m 0644 -o root -g root "$SCRIPT_DIR/compose.prod.yml" "$APP_DIR/compose.prod.yml"
     install -d -m 0755 -o root -g root "$APP_DIR/initdb"
     install -m 0755 -o root -g root "$SCRIPT_DIR/initdb/10-roles.sh" "$APP_DIR/initdb/10-roles.sh"
@@ -142,18 +156,6 @@ step_compose_files() {
     fi
 
     echo "    installed $APP_DIR/compose.prod.yml, $APP_DIR/initdb/10-roles.sh"
-
-    # The Caddy stack may be shared with other sites on this host: never overwrite an existing
-    # Caddyfile/compose.yml (a re-run would silently drop the other sites) — only create them.
-    for file in compose.yml Caddyfile; do
-        if [ -f "$CADDY_DIR/$file" ]; then
-            echo "    $CADDY_DIR/$file already exists, leaving it untouched (merge deploy/caddy/$file by hand if needed)"
-        else
-            install -m 0644 -o root -g root "$SCRIPT_DIR/caddy/$file" "$CADDY_DIR/$file"
-            echo "    installed $CADDY_DIR/$file"
-        fi
-    done
-    check_caddy_stack
 }
 
 # The app is reachable only through Caddy on 'planner-proxy', as `planner-app:8000`. A
@@ -341,8 +343,10 @@ main() {
     step_scripts
     step_sudoers
     step_dirs
-    step_compose_files
+    # Secrets first: compose.prod.yml must never reference a secret file that does not
+    # exist yet (planner-deploy refuses to deploy then).
     step_secrets
+    step_compose_files
     step_network
     step_caddy
     step_backup_cron
