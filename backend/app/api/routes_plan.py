@@ -19,6 +19,7 @@ from app.api.deps import (
 from app.api.schemas import (
     ApplyRequest,
     ApplyResponse,
+    ConfirmationResponse,
     ImportFailure,
     ImportSuccess,
     PlanResponse,
@@ -152,6 +153,42 @@ async def import_plan(
         warnings=result.warnings,
     )
     return JSONResponse(ok.model_dump(mode="json"))
+
+
+@router.get("/confirmation", dependencies=[Depends(check_origin)])
+async def get_confirmation(
+    request: Request, session_id: uuid.UUID = Depends(require_session)
+) -> ConfirmationResponse | None:
+    """The session's pending mass-delete confirmation (either origin), or null. Expired ones
+    count as absent. Changes arrive on GET /api/events as confirmation_pending (MCP requests)
+    and confirmation_resolved."""
+    pending = await get_service(request).get_confirmation(session_id)
+    return ConfirmationResponse.of(pending) if pending else None
+
+
+@router.post(
+    "/confirmation/{confirmation_id}/approve",
+    dependencies=[Depends(check_origin), Depends(limit_mutations)],
+)
+async def approve_confirmation(
+    request: Request, confirmation_id: uuid.UUID, session_id: uuid.UUID = Depends(require_session)
+) -> ConfirmationResponse:
+    """Approve an MCP client's mass deletion: its next confirmed=true of that exact batch may
+    run it. 404 unless it is the session's current, unexpired MCP request."""
+    pending = await get_service(request).approve_confirmation(session_id, confirmation_id)
+    return ConfirmationResponse.of(pending)
+
+
+@router.post(
+    "/confirmation/{confirmation_id}/reject",
+    status_code=204,
+    dependencies=[Depends(check_origin), Depends(limit_mutations)],
+)
+async def reject_confirmation(
+    request: Request, confirmation_id: uuid.UUID, session_id: uuid.UUID = Depends(require_session)
+) -> None:
+    """Reject the session's current pending confirmation (either origin); 404 if it isn't."""
+    await get_service(request).reject_confirmation(session_id, confirmation_id)
 
 
 @router.get("/tasks/{task_id}/history")

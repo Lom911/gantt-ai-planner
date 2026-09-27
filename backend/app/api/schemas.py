@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Any, Literal
 
@@ -7,6 +8,7 @@ from app.domain.diff import Change
 from app.domain.operations import OperationBatch
 from app.domain.scheduler import ScheduledPlan
 from app.excel.parse import ImportIssue
+from app.services.confirmations import PendingConfirmation
 from app.services.plan_service import PlanState
 
 
@@ -64,6 +66,30 @@ class McpTokenStatus(BaseModel):
     created_at: datetime | None = None
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
+
+
+class ConfirmationResponse(BaseModel):
+    """A mass deletion waiting for the user's confirmation. `origin` "mcp": an external MCP
+    client asked, the user approves or rejects it here; "agent": the in-app assistant asked,
+    the user confirms by replying «да» in the chat (it can still be rejected here)."""
+
+    id: uuid.UUID
+    origin: Literal["agent", "mcp"]
+    summary: str
+    count: int
+    expires_at: datetime
+    approved: bool
+
+    @classmethod
+    def of(cls, pending: PendingConfirmation) -> "ConfirmationResponse":
+        return cls(
+            id=pending.id,
+            origin=pending.origin,
+            summary=pending.summary,
+            count=pending.count,
+            expires_at=pending.expires_at,
+            approved=pending.approved,
+        )
 
 
 def to_plan_response(state: PlanState, busy: bool) -> PlanResponse:

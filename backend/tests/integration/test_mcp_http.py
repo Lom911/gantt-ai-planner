@@ -85,20 +85,37 @@ async def test_apply_operations_over_http_increments_version_and_publishes_mcp_e
     assert after.version == before.version + 1
 
 
-async def test_external_mcp_client_confirms_mass_delete_itself(app, session_client):
-    # The in-app agent's «only the user's own yes confirms» guard doesn't apply here: an
-    # external client is the user's own tool, its confirmed=true goes straight to the server.
+async def test_external_mcp_mass_delete_needs_approval_in_the_browser(app, session_client):
+    # An external client's own confirmed=true proves nothing (the model behind it can be talked
+    # into setting it): the user approves the exact batch in the web app, then the client's
+    # confirmed=true of that batch runs it.
     token = await _issue_token(session_client)
+    session_id = await app.state.service.resolve_session(session_client.cookies.get("sid"))
+    queue = app.state.service.bus.subscribe(session_id)
     ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
     async with _mcp_client(app, token) as client:
         refused = await client.call_tool(
             "apply_operations", {"operations": ops}, raise_on_error=False
         )
+        assert refused.is_error and "confirmation_required" in refused.content[0].text
+        assert "веб-приложении" in refused.content[0].text
+        early = await client.call_tool(
+            "apply_operations", {"operations": ops, "confirmed": True}, raise_on_error=False
+        )
+        assert early.is_error and "ещё не подтверждено" in early.content[0].text
+
+        pending = (await session_client.get("/api/plan/confirmation")).json()
+        assert pending["origin"] == "mcp" and pending["count"] == 6 and not pending["approved"]
+        event = queue.get_nowait()
+        assert event["type"] == "confirmation_pending" and event["id"] == pending["id"]
+        approve = await session_client.post(f"/api/plan/confirmation/{pending['id']}/approve")
+        assert approve.status_code == 200
+
         confirmed = await client.call_tool(
             "apply_operations", {"operations": ops, "confirmed": True}
         )
-    assert refused.is_error and "confirmation_required" in refused.content[0].text
     assert not confirmed.is_error and confirmed.structured_content["version"] == 2
+    assert len((await app.state.service.get_state(session_id)).plan.tasks) == 19
 
 
 async def test_bad_token_is_rejected(app, session_client):

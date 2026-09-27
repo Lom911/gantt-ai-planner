@@ -5,7 +5,14 @@ from typing import Any, NamedTuple
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import ChatMessageRow, ChatUsageRow, McpTokenRow, PlanVersionRow, SessionRow
+from app.db.models import (
+    ChatMessageRow,
+    ChatUsageRow,
+    McpTokenRow,
+    PlanConfirmationRow,
+    PlanVersionRow,
+    SessionRow,
+)
 
 
 class VersionMeta(NamedTuple):
@@ -298,6 +305,81 @@ async def revoke_mcp_tokens(db: AsyncSession, session_id: uuid.UUID, now: dateti
 
 async def touch_mcp_token(db: AsyncSession, token_id: uuid.UUID, now: datetime) -> None:
     await db.execute(update(McpTokenRow).where(McpTokenRow.id == token_id).values(last_used_at=now))
+
+
+async def get_unresolved_confirmation(
+    db: AsyncSession, session_id: uuid.UUID
+) -> PlanConfirmationRow | None:
+    """The session's unresolved confirmation (at most one: partial unique index), expired or
+    not — callers decide what an expired one means."""
+    return await db.scalar(
+        select(PlanConfirmationRow).where(
+            PlanConfirmationRow.session_id == session_id, PlanConfirmationRow.resolved.is_(None)
+        )
+    )
+
+
+async def add_confirmation(
+    db: AsyncSession,
+    *,
+    session_id: uuid.UUID,
+    digest: str,
+    origin: str,
+    summary: str,
+    task_count: int,
+    expires_at: datetime,
+) -> PlanConfirmationRow:
+    row = PlanConfirmationRow(
+        session_id=session_id,
+        digest=digest,
+        origin=origin,
+        summary=summary,
+        task_count=task_count,
+        expires_at=expires_at,
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def resolve_confirmation(db: AsyncSession, confirmation_id: uuid.UUID, resolved: str) -> None:
+    # A statement, not an ORM attribute change: it must reach the database before a following
+    # INSERT of the next pending row, or the partial unique index would refuse that one.
+    await db.execute(
+        update(PlanConfirmationRow)
+        .where(PlanConfirmationRow.id == confirmation_id)
+        .values(resolved=resolved)
+    )
+
+
+async def approve_confirmation(db: AsyncSession, confirmation_id: uuid.UUID, now: datetime) -> None:
+    await db.execute(
+        update(PlanConfirmationRow)
+        .where(PlanConfirmationRow.id == confirmation_id)
+        .values(approved_at=now)
+    )
+
+
+async def resolve_unresolved_confirmations(
+    db: AsyncSession, session_id: uuid.UUID, *, origin: str, resolved: str
+) -> list[uuid.UUID]:
+    result = await db.execute(
+        update(PlanConfirmationRow)
+        .where(
+            PlanConfirmationRow.session_id == session_id,
+            PlanConfirmationRow.origin == origin,
+            PlanConfirmationRow.resolved.is_(None),
+        )
+        .values(resolved=resolved)
+        .returning(PlanConfirmationRow.id)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def prune_confirmations(db: AsyncSession, expired_before: datetime) -> None:
+    await db.execute(
+        delete(PlanConfirmationRow).where(PlanConfirmationRow.expires_at < expired_before)
+    )
 
 
 async def delete_expired_session_ids(db: AsyncSession, older_than: datetime) -> list[uuid.UUID]:

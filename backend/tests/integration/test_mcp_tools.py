@@ -28,6 +28,8 @@ async def test_tool_definitions_are_anthropic_shaped(app):
     assert "operations" in apply["input_schema"]["properties"]
     assert "session_id" not in json.dumps(defs)
     assert apply["input_schema"]["properties"]["operations"]["maxItems"] == 200
+    # Both kinds of caller learn how a mass deletion gets confirmed.
+    assert "«да»" in apply["description"] and "веб-приложении" in apply["description"]
 
 
 async def test_get_plan_and_find_tasks(app):

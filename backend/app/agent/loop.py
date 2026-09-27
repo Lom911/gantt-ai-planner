@@ -35,6 +35,10 @@ CONFIRMATION_DROPPED_NOTE = (
     "[confirmed=true не принят: в текущем сообщении пользователя нет явного подтверждения. "
     "Спроси пользователя и дождись его ответа «да».]\n"
 )
+CONFIRMATION_ASKED_NOTE = (
+    "[confirmed=true не принят: подтверждение этого удаления запрошено уже после сообщения "
+    "пользователя, его «да» относилось к другому. Спроси пользователя и дождись ответа «да».]\n"
+)
 
 
 class TooManySteps(Exception):
@@ -136,6 +140,11 @@ class Agent:
                             turn_id=turn_id,
                         )
                     history = await repo.recent_chat_messages(db, session_id, self._history_limit)
+                user_confirmed = is_explicit_confirmation(user_text)
+                if not user_confirmed:
+                    # Any reply other than «да» answers the assistant's question: a mass deletion
+                    # it asked about is off, and a later «да» to something else can't revive it.
+                    await service.discard_confirmation(session_id, origin="agent")
                 start = await service.get_state(session_id)
                 text_parts: list[str] = []
                 failure: dict[str, Any] | None = None
@@ -148,7 +157,7 @@ class Agent:
                             history,
                             text_parts,
                             stats,
-                            user_confirmed=is_explicit_confirmation(user_text),
+                            user_confirmed=user_confirmed,
                         )
                     ) as bounded:
                         async for event in bounded:
@@ -292,6 +301,9 @@ class Agent:
         system = build_system(render_plan_table(start.scheduled, self._today()))
         messages = to_llm_messages(history)
         tools = await self._tools.tool_definitions()
+        # Set once the server asked for a confirmation during this turn: the user's message
+        # predates that question, so it can't be the answer to it.
+        asked_this_turn = False
         for _ in range(self._max_iterations):
             result: LLMTurnResult | None = None
             # Text written before a tool call and text written after it are separate
@@ -324,19 +336,24 @@ class Agent:
                 stats.tools.append(call.name)
                 yield {"type": "tool_started", "name": call.name}
                 args = call.input
-                # Security audit L3: only the user's own reply in THIS turn can confirm a mass
-                # deletion; a flag the model set on its own (text in the plan can talk it into
+                # Security audit L3: the confirmed=true that reaches the server is this loop
+                # vouching that the user's message of THIS turn is an exact «да» answering a
+                # confirmation asked before it (PlanService._gate_confirmation trusts it for
+                # the agent). A flag the model set on its own (text in the plan can talk it into
                 # that) is dropped, so the server answers confirmation_required again. External
-                # MCP clients don't go through here: their flag reaches the server as sent.
-                blocked = (
-                    call.name == "apply_operations"
-                    and not user_confirmed
-                    and args.get("confirmed", False) is not False
-                )
-                if blocked:
+                # MCP clients don't go through here: they need the user's approval in the app.
+                blocked_note = None
+                if call.name == "apply_operations" and args.get("confirmed", False) is not False:
+                    if not user_confirmed:
+                        blocked_note = CONFIRMATION_DROPPED_NOTE
+                    elif asked_this_turn:
+                        blocked_note = CONFIRMATION_ASKED_NOTE
+                if blocked_note:
                     args = {**args, "confirmed": False}
                     stats.confirm_blocked += 1
                 r = await self._tools.call(call.name, args, session_id=session_id, turn_id=turn_id)
+                if call.name == "apply_operations" and r.is_error:
+                    asked_this_turn |= r.text.startswith("confirmation_required")
                 summary = r.text[:200] if r.is_error else (r.data or {}).get("summary")
                 yield {
                     "type": "tool_finished",
@@ -347,8 +364,8 @@ class Agent:
                 if call.name in MUTATING_TOOLS and not r.is_error and r.data:
                     yield {"type": "plan_changed", "version": r.data.get("version")}
                 content = _cap(r.text)
-                if blocked and r.is_error:
-                    content = CONFIRMATION_DROPPED_NOTE + content
+                if blocked_note and r.is_error:
+                    content = blocked_note + content
                 tool_results.append(
                     {
                         "type": "tool_result",

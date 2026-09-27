@@ -393,11 +393,78 @@ async def test_model_cannot_confirm_a_mass_delete_without_the_users_yes(app):
 
     events = await collect(agent, sid, "да нет, не надо")
     assert len((await app.state.service.get_state(sid)).plan.tasks) == 25
-
+    # Only the exact reply the assistant asks for confirms: not «да» with anything added.
     events = await collect(agent, sid, "Да, удаляй")
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [False]
+    assert len((await app.state.service.get_state(sid)).plan.tasks) == 25
+
+    events = await collect(agent, sid, "Да!")
     assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [True]
     state = await app.state.service.get_state(sid)
     assert state.version == 2 and len(state.plan.tasks) == 19
+    assert await app.state.service.get_confirmation(sid) is None  # consumed
+
+
+def _tool_rounds_this_turn(messages):
+    rounds = 0
+    for m in reversed(messages):
+        if m["role"] == "user" and isinstance(m["content"], str):
+            break
+        rounds += m["role"] == "user"
+    return rounds
+
+
+class RetryingDeleter:
+    """Deletes tasks 1-6 with confirmed=true and, when refused, tries once more in the same
+    turn before answering."""
+
+    def __init__(self):
+        self.tool_results = []
+
+    async def stream(self, *, system, tools, messages, max_tokens=None):
+        last = messages[-1]["content"]
+        if isinstance(last, list):
+            self.tool_results.append(last[0]["content"])
+        if _tool_rounds_this_turn(messages) < 2:
+            ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
+            args = {"operations": ops, "confirmed": True}
+            yield Completed(_tool_turn(f"d{len(messages)}", "apply_operations", args))
+        else:
+            yield Completed(_final_turn("Подтвердите удаление задач 1–6."))
+
+
+async def test_a_yes_cannot_confirm_a_deletion_asked_after_it(app, caplog):
+    # The user's «да» answered something else; a model that asks for a mass deletion in the
+    # same turn must not be able to confirm it with that «да» right away.
+    llm = RetryingDeleter()
+    agent = Agent(llm, app.state.tool_client, app.state.service, today=lambda: TODAY)
+    sid = await new_sid(app)
+    with caplog.at_level(logging.INFO, logger="app.agent.trace"):
+        events = await collect(agent, sid, "да")
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [False, False]
+    assert len((await app.state.service.get_state(sid)).plan.tasks) == 25
+    assert "confirmation_required" in llm.tool_results[1]
+    assert "после сообщения пользователя" in llm.tool_results[1]
+    [line] = _trace_lines(caplog)
+    assert " confirm_blocked=1 " in line
+    # The request stays pending, so the user's next «да» does confirm it.
+    events = await collect(agent, sid, "да")
+    oks = [e["ok"] for e in events if e["type"] == "tool_finished"]
+    assert oks[0] is True  # (the model's retry then fails: those tasks are gone)
+    assert len((await app.state.service.get_state(sid)).plan.tasks) == 19
+
+
+async def test_a_reply_other_than_yes_ends_the_pending_confirmation(app):
+    sid = await new_sid(app)
+    deleter = Agent(MassDeleter(), app.state.tool_client, app.state.service, today=lambda: TODAY)
+    await collect(deleter, sid, "Удали задачи 1, 2, 3, 4, 5, 6")
+    assert (await app.state.service.get_confirmation(sid)).origin == "agent"
+    await collect(app.state.agent, sid, "покажи план")  # answers the question with something else
+    assert await app.state.service.get_confirmation(sid) is None
+    # A later «да» (to whatever) can't pick the old request up.
+    events = await collect(deleter, sid, "да")
+    assert [e["ok"] for e in events if e["type"] == "tool_finished"] == [False]
+    assert len((await app.state.service.get_state(sid)).plan.tasks) == 25
 
 
 async def test_confirmation_guard_is_counted_in_the_trace(app, caplog):
