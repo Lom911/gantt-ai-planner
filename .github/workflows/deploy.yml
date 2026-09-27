@@ -71,6 +71,7 @@ jobs:
           image-ref: ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
           # Block on HIGH too, but only when a fixed version exists (ignore-unfixed): an
           # unfixable base-image CVE would otherwise block every deploy with nothing to do.
+          # So this gate covers FIXABLE HIGH/CRITICAL CVEs only (CI runs the same scan on PRs).
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
