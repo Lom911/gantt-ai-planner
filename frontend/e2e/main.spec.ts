@@ -23,7 +23,10 @@ test("demo → import → chat edit → export", async ({ page }) => {
 
   await page.getByRole("textbox", { name: /сообщение/i }).fill("Сдвинь все задачи Олега на 3 дня");
   await page.keyboard.press("Enter");
-  await expect(page.getByText(/Изменено задач: \d+/).first()).toBeVisible({ timeout: 20_000 });
+  // The fake LLM answers at once; pointed at a live deployment (E2E_BASE_URL) a real model's turn
+  // takes 15–40 s.
+  const live = !/localhost|127\.0\.0\.1/.test(String(test.info().project.use.baseURL));
+  await expect(page.getByText(/Изменено задач: \d+/).first()).toBeVisible({ timeout: live ? 120_000 : 20_000 });
 
   const download = page.waitForEvent("download");
   await page.getByRole("link", { name: "Экспорт" }).click();
