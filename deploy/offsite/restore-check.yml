@@ -1,0 +1,196 @@
+name: Restore check
+
+# Weekly proof that the newest OFFSITE backup can really be restored.
+#
+# NOT a workflow of gantt-ai-planner itself: copy this file to
+# .github/workflows/restore-check.yml of the PRIVATE backups repository that
+# gantt-planner-offsite-backup.sh (deploy/offsite-backup.sh) pushes to, and set that
+# repository's Actions secret BACKUP_PRIVATE_KEY to the contents of backup-private.pem
+# (docs/runbook.md section 4). The private key exists only there and offline.
+#
+# - decrypts the newest dumps/*.cms with `openssl cms -decrypt`;
+# - restores it with pg_restore into a throwaway postgres:17-alpine service (the
+#   production image), after creating the roles planner_owner / planner_app as in
+#   production - the same procedure as a real disaster restore;
+# - sanity checks: tables sessions, plan_versions, chat_messages and alembic_version
+#   exist, `select count(*) from plan_versions` works, alembic_version has a revision;
+# - the newest dump is at most MAX_AGE_DAYS old: a stalled offsite copy alerts here.
+# Failure -> opens (or comments on) an issue labelled `restore-check` and fails the run;
+# success -> closes it.
+
+on:
+  schedule:
+    - cron: "41 5 * * 1" # Mondays 05:41 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: restore-check
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_PASSWORD: restore-check-only
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 3s --health-retries 20
+    env:
+      MAX_AGE_DAYS: "3"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Decrypt and restore the newest backup
+        id: restore
+        env:
+          BACKUP_PRIVATE_KEY: ${{ secrets.BACKUP_PRIVATE_KEY }}
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          # Every failure is collected into the report: no `-e`.
+          set +e -uo pipefail
+          problems="$RUNNER_TEMP/problems.md"
+          details="$RUNNER_TEMP/details.md"
+          : > "$problems"
+          : > "$details"
+          problem() { printf -- '- %s\n' "$*" >> "$problems"; }
+          detail() { printf -- '- %s\n' "$*" >> "$details"; }
+          # pg 17 client tools of the service container itself (same version as the dump).
+          psql_planner() { docker exec -i "$PG_CONTAINER" psql -U postgres -d planner -v ON_ERROR_STOP=1 -tAq -c "$1"; }
+
+          restore() {
+            newest="$(find dumps -maxdepth 1 -name '*.cms' 2>/dev/null | LC_ALL=C sort | tail -n1)"
+            if [ -z "$newest" ]; then
+              problem "no dumps/*.cms in this repository: the offsite copy never ran"
+              return
+            fi
+            detail "newest backup: \`$newest\` ($(wc -c < "$newest" | tr -d ' ') bytes)"
+
+            # Names are <YYYY-MM-DD>.dump.cms (backup.sh's date).
+            day="$(basename "$newest" .dump.cms)"
+            if day_epoch="$(date -u -d "$day" +%s 2>/dev/null)"; then
+              age_days=$(( ($(date -u +%s) - day_epoch) / 86400 ))
+              detail "age: $age_days day(s)"
+              if [ "$age_days" -gt "$MAX_AGE_DAYS" ]; then
+                problem "the newest backup is $age_days days old (> $MAX_AGE_DAYS): the offsite copy on the server has stalled (journalctl -t gantt-planner-offsite)"
+              fi
+            else
+              problem "cannot tell the date of \`$newest\` (expected dumps/YYYY-MM-DD.dump.cms)"
+            fi
+
+            if [ -z "${BACKUP_PRIVATE_KEY:-}" ]; then
+              problem "the secret BACKUP_PRIVATE_KEY is not set"
+              return
+            fi
+            key="$RUNNER_TEMP/backup-private.pem"
+            dump="$RUNNER_TEMP/restore.dump"
+            (umask 077 && printf '%s\n' "$BACKUP_PRIVATE_KEY" > "$key")
+            openssl cms -decrypt -binary -inform DER -in "$newest" -inkey "$key" -out "$dump" \
+              2> "$RUNNER_TEMP/openssl.err"
+            decrypt_status=$?
+            rm -f "$key"
+            if [ "$decrypt_status" -ne 0 ] || [ ! -s "$dump" ]; then
+              problem "decryption failed (wrong BACKUP_PRIVATE_KEY?): $(head -c 300 "$RUNNER_TEMP/openssl.err" | tr '\n' ' ')"
+              return
+            fi
+            detail "decrypted: $(wc -c < "$dump" | tr -d ' ') bytes"
+
+            # As in production (deploy/initdb/10-roles.sh): the dump's owners and grants
+            # name these roles.
+            if ! docker exec "$PG_CONTAINER" psql -U postgres -v ON_ERROR_STOP=1 -q \
+              -c "CREATE ROLE planner_owner NOLOGIN" -c "CREATE ROLE planner_app NOLOGIN" \
+              -c "CREATE DATABASE planner OWNER planner_owner" 2> "$RUNNER_TEMP/prepare.err"; then
+              problem "could not prepare the scratch database: $(head -c 300 "$RUNNER_TEMP/prepare.err" | tr '\n' ' ')"
+              return
+            fi
+            if ! docker exec -i "$PG_CONTAINER" pg_restore -U postgres -d planner --exit-on-error \
+              < "$dump" 2> "$RUNNER_TEMP/restore.err"; then
+              problem "pg_restore failed: $(tail -c 400 "$RUNNER_TEMP/restore.err" | tr '\n' ' ')"
+              return
+            fi
+            rm -f "$dump"
+            detail "pg_restore: ok"
+
+            for table in sessions plan_versions chat_messages alembic_version; do
+              if [ "$(psql_planner "SELECT to_regclass('public.$table') IS NOT NULL")" != t ]; then
+                problem "table $table is missing after the restore"
+              fi
+            done
+            if versions="$(psql_planner 'SELECT count(*) FROM plan_versions')"; then
+              detail "plan_versions: $versions rows, sessions: $(psql_planner 'SELECT count(*) FROM sessions') rows"
+            else
+              problem "SELECT count(*) FROM plan_versions failed"
+            fi
+            revision="$(psql_planner 'SELECT version_num FROM alembic_version')"
+            if [ -n "$revision" ]; then
+              detail "alembic revision: $revision"
+            else
+              problem "alembic_version has no revision"
+            fi
+          }
+          restore
+
+          report="$RUNNER_TEMP/restore-report.md"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -s "$problems" ]; then
+            ok=false
+            {
+              printf 'Restore check failed at **%s** (%s).\n\n' "$now" "$RUN_URL"
+              cat "$problems"
+              echo
+              echo 'Details:'
+              echo
+              cat "$details"
+              echo
+              echo 'Runbook: gantt-ai-planner docs/runbook.md, section 4 (offsite backups).'
+            } > "$report"
+          else
+            ok=true
+            { printf 'Restore check passed at %s (%s).\n\n' "$now" "$RUN_URL"; cat "$details"; } > "$report"
+          fi
+          cat "$report"
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          echo "report=$report" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the restore-check issue
+        if: steps.restore.outputs.ok != 'true'
+        env:
+          REPORT: ${{ steps.restore.outputs.report }}
+        run: |
+          set -euo pipefail
+          gh label create restore-check --color B60205 \
+            --description "The newest offsite backup could not be restored (opened by the Restore check workflow)" --force
+          issue="$(gh issue list --label restore-check --state open --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body-file "$REPORT"
+          else
+            gh issue create --title "Offsite backup restore check is failing" --label restore-check --body-file "$REPORT"
+          fi
+
+      - name: Close the restore-check issue
+        if: steps.restore.outputs.ok == 'true'
+        env:
+          REPORT: ${{ steps.restore.outputs.report }}
+        run: |
+          set -euo pipefail
+          issues="$(gh issue list --label restore-check --state open --json number --jq '.[].number' 2>/dev/null || true)"
+          for issue in $issues; do
+            gh issue close "$issue" --reason completed --comment "$(cat "$REPORT")"
+          done
+
+      - name: Fail the run while restores fail
+        if: steps.restore.outputs.ok != 'true'
+        run: |
+          echo "::error::the newest offsite backup could not be restored - see the open 'restore-check' issue"
+          exit 1

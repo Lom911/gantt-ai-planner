@@ -7,8 +7,9 @@
 Сервер общий с другими сервисами — ничего из описанного здесь не должно
 затрагивать их порты, сети или конфигурацию. Скрипты в `deploy/` тоже
 этого не делают: `deploy/bootstrap.sh` работает только с пользователем
-`deploy`, каталогами `/opt/gantt-planner`, `/opt/caddy`, сетями Docker
-`edge` и `planner-proxy` и cron-задачей бэкапа.
+`deploy`, каталогами `/opt/gantt-planner`, `/opt/caddy`,
+`/etc/gantt-planner`, сетями Docker `edge` и `planner-proxy` и
+cron-задачей бэкапа.
 
 ## Обзор стенда
 
@@ -24,7 +25,10 @@
   снапшоты перед каждым деплоем `pre-deploy-<UTC>.dump`, те и другие
   хранятся 7 дней.
 - `/var/lib/gantt-planner/backup-status` — итог последнего ночного бэкапа
-  (раздел 4).
+  и его офсайт-копии (раздел 4).
+- `/etc/gantt-planner` (0700, root) — настройки офсайт-копий:
+  `offsite.conf`, публичный сертификат `backup-recipient.pem`, deploy-ключ
+  `backup-deploy-key`, `github_known_hosts` (раздел 4, «Офсайт-копии»).
 - `/opt/caddy` — общий reverse proxy (Caddy 2), обслуживает
   `gantt-ai-planner.duckdns.org` вместе с другими сайтами на этом хосте.
 - Сети Docker:
@@ -50,9 +54,13 @@
 2. Запустить `sudo bash deploy/bootstrap.sh`. Скрипт идемпотентен, каждый
    шаг печатает, что делает:
    - создаёт системного пользователя `deploy` (без группы `docker`);
+   - берёт ту же блокировку, что `planner-deploy`
+     (`/run/lock/planner-deploy.lock`), чтобы не менять файлы под идущим
+     деплоем;
    - устанавливает `/usr/local/bin/planner-deploy`,
      `/usr/local/bin/planner-deploy-wrapper`,
-     `/usr/local/bin/gantt-planner-backup.sh`;
+     `/usr/local/bin/gantt-planner-backup.sh`,
+     `/usr/local/bin/gantt-planner-offsite-backup.sh`;
    - устанавливает правило sudoers `/etc/sudoers.d/gantt-planner-deploy`
      (провалидировано `visudo -cf` перед установкой);
    - создаёт каталоги `/opt/gantt-planner`, `/opt/gantt-planner/secrets`
@@ -88,7 +96,11 @@
      существующую `planner-proxy` без `--internal` не принимает;
    - поднимает стек Caddy (`docker compose up -d` в `/opt/caddy`);
    - устанавливает cron `/etc/cron.d/gantt-planner-backup` (03:15 каждый
-     день).
+     день);
+   - создаёт `/etc/gantt-planner` (0700) и кладёт туда
+     `github_known_hosts` (закреплённый ключ хоста github.com) и сообщает,
+     настроены ли офсайт-копии (раздел 4, «Офсайт-копии»; пока нет —
+     бэкапы остаются только локальными).
 3. После bootstrap вручную:
    - убедиться, что пакет `ghcr.io/alomaev-hue/gantt-ai-planner` публичный,
      иначе `docker compose pull` на сервере (без залогина в GHCR) не сможет
@@ -696,6 +708,138 @@ docker compose -f compose.prod.yml exec -T db psql -U postgres -c \
 |---|---|---|
 | _(заполнить после первой проверки)_ | | |
 
+### Офсайт-копии (зашифрованные, в приватный репозиторий GitHub)
+
+Локальные дампы лежат на том же диске, что и база: при потере сервера
+они пропадут вместе с ним. Поэтому после каждого успешного ночного дампа
+`backup.sh` запускает `/usr/local/bin/gantt-planner-offsite-backup.sh`
+(`deploy/offsite-backup.sh`), который:
+
+1. шифрует дамп **только публичным** ключом:
+   `openssl cms -encrypt -binary -aes-256-cbc -outform DER -in <дамп> -out <дамп>.cms /etc/gantt-planner/backup-recipient.pem`
+   — приватного ключа на сервере нет, поэтому ни сервер (даже
+   взломанный), ни GitHub прочитать копии не могут;
+2. кладёт `dumps/<ГГГГ-ММ-ДД>.dump.cms` в **приватный** репозиторий
+   GitHub по SSH с deploy-ключом с правом записи
+   (`GIT_SSH_COMMAND='ssh -i /etc/gantt-planner/backup-deploy-key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/gantt-planner/github_known_hosts …'`);
+   адрес и ветка — из `/etc/gantt-planner/offsite.conf`;
+3. оставляет в дереве 30 самых новых копий (по имени = дате; старые
+   остаются в истории git);
+4. пишет в syslog (`journalctl -t gantt-planner-offsite`) и в
+   `backup-status` строки `offsite_status` (`ok` / `fail` /
+   `not_configured`), `offsite_last_ok`, `offsite_file`.
+
+Пока `offsite.conf`, сертификат или deploy-ключ не созданы, скрипт пишет
+`offsite not configured` и выходит с кодом 0 — локальный бэкап всё равно
+считается успешным. Сбой офсайт-копии тоже не делает ночной бэкап
+неуспешным (он записан как `offsite_status=fail` и предупреждение в
+журнале `gantt-planner-backup`); застой ловит проверка восстановления
+(ниже): она падает, если свежайшей копии больше 3 дней. Платного
+хранилища не нужно: приватный репозиторий и Actions (≈2 минуты в неделю
+из бесплатных 2000 в месяц) бесплатны.
+
+Где что лежит:
+
+| Файл | Где | Примечание |
+|---|---|---|
+| `backup-private.pem` (приватный ключ) | секрет `BACKUP_PRIVATE_KEY` репозитория бэкапов **и** офлайн-копия (менеджер паролей / зашифрованный носитель) | **никогда** не на сервере; без него копии не расшифровать |
+| `backup-recipient.pem` (сертификат, публичный) | `/etc/gantt-planner/backup-recipient.pem`, 0644 | срок — 10 лет |
+| `backup-deploy-key` (приватный SSH-ключ) | `/etc/gantt-planner/backup-deploy-key`, 0600 | создаётся на сервере и его не покидает |
+| `backup-deploy-key.pub` | репозиторий бэкапов → Settings → Deploy keys, **Allow write access** | |
+| `offsite.conf` | `/etc/gantt-planner/offsite.conf`, 0600 | образец — `deploy/offsite/offsite.conf.example` |
+| `github_known_hosts` | `/etc/gantt-planner/github_known_hosts` | ставит bootstrap (`deploy/offsite/github_known_hosts`) |
+| `restore-check.yml` | репозиторий бэкапов → `.github/workflows/restore-check.yml` | копия `deploy/offsite/restore-check.yml` |
+
+Настройка (один раз, по порядку):
+
+1. **На своей машине** (не на сервере) — ключ и сертификат:
+   ```bash
+   openssl req -x509 -newkey rsa:4096 -nodes -keyout backup-private.pem -out backup-recipient.pem -days 3650 -subj /CN=gantt-planner-backups
+   ```
+   `backup-private.pem` сразу убрать в менеджер паролей / на
+   зашифрованный носитель.
+2. Создать на GitHub **приватный** репозиторий (например,
+   `gantt-ai-planner-backups`, с README, чтобы появилась ветка `main`);
+   добавить в него `.github/workflows/restore-check.yml` из
+   `deploy/offsite/restore-check.yml`; Settings → Secrets and variables →
+   Actions → New repository secret `BACKUP_PRIVATE_KEY` = всё содержимое
+   `backup-private.pem` (с строками `-----BEGIN/END PRIVATE KEY-----`);
+   подписаться на issues репозитория (Watch → Custom → Issues).
+3. На сервере — `sudo bash deploy/bootstrap.sh` (ставит скрипт,
+   `/etc/gantt-planner` и `github_known_hosts`) и проверить отпечаток
+   ключа github.com — должен быть
+   `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`, как на
+   docs.github.com («GitHub's SSH key fingerprints»):
+   ```bash
+   ssh-keygen -lf /etc/gantt-planner/github_known_hosts
+   ```
+4. Сертификат (скопировать `backup-recipient.pem` на сервер, например
+   `scp`, затем):
+   ```bash
+   sudo install -m 0644 -o root -g root backup-recipient.pem /etc/gantt-planner/backup-recipient.pem
+   ```
+5. Deploy-ключ — на сервере, и его публичную часть в репозиторий бэкапов
+   (Settings → Deploy keys → Add deploy key → **Allow write access**):
+   ```bash
+   sudo ssh-keygen -t ed25519 -N '' -C gantt-planner-offsite -f /etc/gantt-planner/backup-deploy-key
+   sudo cat /etc/gantt-planner/backup-deploy-key.pub
+   ```
+6. Настройки:
+   ```bash
+   sudo install -m 0600 -o root -g root deploy/offsite/offsite.conf.example /etc/gantt-planner/offsite.conf
+   sudo sed -i 's|^OFFSITE_REPO=.*|OFFSITE_REPO=git@github.com:<owner>/gantt-ai-planner-backups.git|' /etc/gantt-planner/offsite.conf
+   ```
+7. Проверить сразу, не дожидаясь ночи (берёт последний успешный ночной
+   дамп из `backup-status`):
+   ```bash
+   sudo /usr/local/bin/gantt-planner-offsite-backup.sh
+   journalctl -t gantt-planner-offsite --since -10min
+   grep '^offsite_' /var/lib/gantt-planner/backup-status
+   ```
+   В репозитории появится коммит `backup <дата>.dump`. Затем в
+   репозитории бэкапов Actions → Restore check → Run workflow — должен
+   пройти (в сводке: число строк `plan_versions`, ревизия alembic).
+
+Проверка восстановления (`restore-check.yml` в репозитории бэкапов,
+раз в неделю и вручную): расшифровывает свежайший `dumps/*.cms`
+секретом `BACKUP_PRIVATE_KEY`, создаёт роли `planner_owner`/`planner_app`
+и базу `planner` в сервисе `postgres:17-alpine` (тот же образ, что в
+проде), восстанавливает `pg_restore --exit-on-error` и проверяет, что
+есть таблицы `sessions`, `plan_versions`, `chat_messages`,
+`alembic_version`, что `select count(*) from plan_versions` выполняется,
+что в `alembic_version` есть ревизия и что копии не больше 3 дней. При
+провале — issue с меткой `restore-check` в репозитории бэкапов (и
+упавший запуск), при успехе issue закрывается. Вся цепочка (реальный
+`openssl cms` → push → этот шаг workflow → `pg_restore`, плюс
+неправильный ключ, устаревшая копия, пустой секрет) проверена локально
+на одноразовых контейнерах.
+
+Восстановление вручную (сервер потерян или нужен конкретный день) — на
+машине с приватным ключом:
+
+```bash
+git clone git@github.com:<owner>/gantt-ai-planner-backups.git && cd gantt-ai-planner-backups
+git log --oneline -- dumps/          # нужный день; старше 30 дней — в истории: git checkout <commit> -- dumps/<день>.dump.cms
+openssl cms -decrypt -binary -inform DER -in dumps/<ГГГГ-ММ-ДД>.dump.cms -inkey backup-private.pem -out planner.dump
+```
+
+Дальше `planner.dump` — обычный `pg_dump -Fc`: скопировать на сервер
+(`scp`, 0600) и восстановить как снапшот (раздел 2, «Восстановление
+снапшота перед деплоем», п. 1–5) или сначала в scratch-базу (выше в этом
+разделе). На **новом** сервере: `bootstrap.sh`, секреты, первый деплой
+(раздел 1) — роли создаст `initdb` на пустом томе, — затем то же
+восстановление. После — удалить расшифрованный файл (`shred -u
+planner.dump`).
+
+Ограничения: deploy-ключ с правом записи позволяет взломанному серверу
+удалить копии или переписать историю (`push --force`); защита веток в
+бесплатных приватных репозиториях недоступна, поэтому офлайн-копия
+приватного ключа и еженедельная проверка — обязательная часть схемы, а
+при подозрении на взлом сервера — сразу удалить deploy-ключ в
+репозитории бэкапов (раздел 5). GitHub не принимает файлы больше 100 МБ
+(скрипт отказывается от копий больше 95 МБ — тогда нужно другое
+хранилище), а история репозитория растёт на размер одной копии в день.
+
 ## 5. Чек-лист при инциденте (компрометация секрета/сервера)
 
 Если есть подозрение, что скомпрометирован ключ Anthropic, пароль БД,
@@ -710,7 +854,11 @@ deploy-ключ или сам сервер — отзываем всё сраз�
    подозрением только один.
 3. **Deploy-ключ**: удалить скомпрометированную строку из
    `/home/deploy/.ssh/authorized_keys` немедленно (это отключает CD),
-   затем выпустить новый ключ по процедуре из раздела 3.
+   затем выпустить новый ключ по процедуре из раздела 3. Если под
+   подозрением сервер — ещё и удалить deploy-ключ офсайт-бэкапов в
+   репозитории бэкапов (Settings → Deploy keys), чтобы с сервера нельзя
+   было стереть копии, и выпустить новый (раздел 4, «Офсайт-копии», п. 5);
+   сами копии зашифрованы ключом, которого на сервере нет.
 4. **GitHub**: проверить `DEPLOY_SSH_KEY`/`DEPLOY_KNOWN_HOSTS` в
    Environment `production`, при необходимости отозвать и пересоздать
    `GITHUB_TOKEN`-зависимые интеграции (пакет в GHCR публичный, но права

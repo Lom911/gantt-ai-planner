@@ -11,7 +11,9 @@
 # and never runs ufw - it only manages the 'deploy' user, the
 # /opt/gantt-planner and /opt/caddy stacks, the Docker networks 'edge'
 # (Caddy <-> other sites) and 'planner-proxy' (internal, Caddy <-> app
-# only), and the backup cron job.
+# only), the backup cron job and /etc/gantt-planner (offsite backup
+# settings). It takes the deploy lock, so it never swaps files under a
+# running deploy.
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
@@ -23,6 +25,9 @@ DEPLOY_USER=deploy
 PLANNER_DEPLOY_BIN=/usr/local/bin/planner-deploy
 PLANNER_DEPLOY_WRAPPER_BIN=/usr/local/bin/planner-deploy-wrapper
 BACKUP_BIN=/usr/local/bin/gantt-planner-backup.sh
+OFFSITE_BIN=/usr/local/bin/gantt-planner-offsite-backup.sh
+OFFSITE_CONF_DIR=/etc/gantt-planner
+LOCK_FILE=/run/lock/planner-deploy.lock
 SUDOERS_FILE=/etc/sudoers.d/gantt-planner-deploy
 CRON_FILE=/etc/cron.d/gantt-planner-backup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +66,33 @@ step_scripts() {
     install -m 0755 -o root -g root "$SCRIPT_DIR/planner-deploy" "$PLANNER_DEPLOY_BIN"
     install -m 0755 -o root -g root "$SCRIPT_DIR/planner-deploy-wrapper" "$PLANNER_DEPLOY_WRAPPER_BIN"
     install -m 0755 -o root -g root "$SCRIPT_DIR/backup.sh" "$BACKUP_BIN"
-    echo "    installed $PLANNER_DEPLOY_BIN, $PLANNER_DEPLOY_WRAPPER_BIN, $BACKUP_BIN"
+    install -m 0755 -o root -g root "$SCRIPT_DIR/offsite-backup.sh" "$OFFSITE_BIN"
+    echo "    installed $PLANNER_DEPLOY_BIN, $PLANNER_DEPLOY_WRAPPER_BIN, $BACKUP_BIN, $OFFSITE_BIN"
+}
+
+# Offsite backups (deploy/offsite-backup.sh, docs/runbook.md section 4): only the
+# directory and the pinned github.com host key are installed here. The repository
+# settings, the public certificate and the deploy key are created by hand; until all
+# three exist the nightly backup stays local ("offsite not configured").
+step_offsite() {
+    echo "==> Preparing offsite backup settings in $OFFSITE_CONF_DIR"
+    install -d -m 0700 -o root -g root "$OFFSITE_CONF_DIR"
+    if [ -f "$OFFSITE_CONF_DIR/github_known_hosts" ]; then
+        echo "    $OFFSITE_CONF_DIR/github_known_hosts already exists, leaving it untouched"
+    else
+        install -m 0644 -o root -g root "$SCRIPT_DIR/offsite/github_known_hosts" "$OFFSITE_CONF_DIR/github_known_hosts"
+        echo "    installed $OFFSITE_CONF_DIR/github_known_hosts (github.com ed25519 host key)"
+    fi
+    local missing=()
+    for file in offsite.conf backup-recipient.pem backup-deploy-key; do
+        [ -f "$OFFSITE_CONF_DIR/$file" ] || missing+=("$OFFSITE_CONF_DIR/$file")
+    done
+    if [ "${#missing[@]}" -eq 0 ]; then
+        echo "    offsite backups configured"
+    else
+        echo "    offsite backups NOT configured yet (missing: ${missing[*]});"
+        echo "    nightly backups stay local until then - setup: docs/runbook.md section 4"
+    fi
 }
 
 step_sudoers() {
@@ -299,6 +330,13 @@ step_backup_cron() {
 
 main() {
     require_root
+    # Same lock as planner-deploy: never replace its script, compose.prod.yml or the
+    # secrets while a deploy (CD or manual) is running.
+    exec 9>"$LOCK_FILE"
+    if ! flock -w 60 9; then
+        echo "bootstrap.sh: a deploy is running (lock $LOCK_FILE); retry when it is done" >&2
+        exit 1
+    fi
     step_user
     step_scripts
     step_sudoers
@@ -308,6 +346,7 @@ main() {
     step_network
     step_caddy
     step_backup_cron
+    step_offsite
     echo "==> Bootstrap complete."
     echo "    Remaining manual steps:"
     echo "      1. fill in $SECRETS_DIR/openrouter_api_key (default: LLM_PROVIDER=openrouter in"

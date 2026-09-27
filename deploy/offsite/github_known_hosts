@@ -1,0 +1,6 @@
+# github.com SSH host key (ed25519), pinned for deploy/offsite-backup.sh; installed by
+# deploy/bootstrap.sh as /etc/gantt-planner/github_known_hosts.
+# Fingerprint SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU - the value GitHub publishes
+# at https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+# and in https://api.github.com/meta (ssh_keys). Check with: ssh-keygen -lf <this file>
+github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
