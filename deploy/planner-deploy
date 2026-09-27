@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# planner-deploy <tag>
+# planner-deploy <ref>
 #
-# Deploys a new app image tag to the gantt-planner production stack and
-# rolls back automatically if the post-deploy health check does not pass
-# within HEALTH_TIMEOUT seconds. Meant to run as root, invoked via
-# `sudo planner-deploy <tag>` from planner-deploy-wrapper (the forced
+# Deploys a new app image to the gantt-planner production stack and rolls
+# back automatically if the post-deploy health check does not pass within
+# HEALTH_TIMEOUT seconds. Meant to run as root, invoked via
+# `sudo planner-deploy <ref>` from planner-deploy-wrapper (the forced
 # command for the 'deploy' SSH user) - never run directly over SSH by an
 # untrusted caller.
 #
-# <tag> is `sha-<hex>` or, as CD sends it, `sha-<hex>@sha256:<digest>`: the
-# digest pins the exact image CI scanned and pushed (GHCR tags are mutable).
-# Compose accepts `name:tag@digest` references, so the value goes into
-# IMAGE_TAG in .env as is.
+# <ref> is ALWAYS `sha-<hex>@sha256:<digest>` (what CD sends): GHCR tags are
+# mutable, the digest pins the exact image CI scanned and pushed. A bare
+# `sha-<hex>` is refused - for a manual deploy or rollback look the digest up
+# first (docs/runbook.md section 2). Compose accepts `name:tag@digest`
+# references, so the value goes into IMAGE_TAG in .env as is.
 #
-# Flow: pull the new image -> pg_dump snapshot of the database -> write the
-# new tag to .env -> `up -d` (runs `migrate`, recreates `app`) -> health
-# check. A failure before .env is written changes nothing; a failure after
-# it restores the previous tag and restarts only `app` (see finish()).
+# Flow: lock -> pull the new image -> pg_dump snapshot of the database ->
+# write the new ref to .env -> `up -d` (runs `migrate`, recreates `app`) ->
+# health check. A failure before .env is written changes nothing; a failure
+# after it restores the previous ref and restarts only `app` (see finish()).
+# Every step that talks to the registry or the database has a hard deadline
+# (timeout), so a hung pull/dump/up can never hold the deploy lock forever.
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
@@ -24,13 +27,32 @@ ENV_FILE="$APP_DIR/.env"
 COMPOSE_FILE="$APP_DIR/compose.prod.yml"
 BACKUP_DIR=/var/backups/gantt-planner
 SNAPSHOT_RETENTION_DAYS=7
-TAG_RE='^sha-[0-9a-f]{7,40}(@sha256:[0-9a-f]{64})?$'
+TAG_RE='^sha-[0-9a-f]{7,40}@sha256:[0-9a-f]{64}$'
 HEALTH_TIMEOUT=60
 HEALTH_INTERVAL=3
+# One deploy at a time: CD runs are serialised by the workflow's concurrency
+# group, but a manual deploy or rollback can overlap with one. The lock is
+# taken before .env is read, so the rollback target a run records is never a
+# value another run is about to replace. It is released when this process
+# exits (the fd closes), i.e. after the rollback path too.
+LOCK_FILE=/run/lock/planner-deploy.lock
+LOCK_WAIT=30
+# Hard deadlines (seconds) for the steps that can hang on the network or on a
+# database lock; `timeout -k` follows up with SIGKILL if SIGTERM is ignored.
+PULL_TIMEOUT=300
+SNAPSHOT_TIMEOUT=300
+UP_TIMEOUT=300
+PROBE_TIMEOUT=20
+KILL_AFTER=10
 
 usage() {
-    echo "usage: planner-deploy <tag>" >&2
-    echo "  <tag> must match $TAG_RE" >&2
+    echo "usage: planner-deploy <ref>" >&2
+    echo "  <ref> must match $TAG_RE (sha-<commit>@sha256:<digest>)" >&2
+}
+
+fail() {
+    echo "planner-deploy: $*" >&2
+    exit 1
 }
 
 if [ "$#" -ne 1 ]; then
@@ -41,16 +63,29 @@ fi
 new_tag="$1"
 
 if ! [[ "$new_tag" =~ $TAG_RE ]]; then
-    echo "planner-deploy: rejected tag '$new_tag' (must match $TAG_RE)" >&2
-    exit 1
+    fail "rejected ref '$new_tag' (must match $TAG_RE: sha-<commit>@sha256:<digest>, never a bare tag)"
 fi
 
+# /run/lock is world-writable (sticky): never open a lock file planted there by
+# someone else (a symlink, or a file this user - root - does not own).
+if [ -L "$LOCK_FILE" ] || { [ -e "$LOCK_FILE" ] && [ ! -O "$LOCK_FILE" ]; }; then
+    fail "lock file $LOCK_FILE is a symlink or not owned by $(id -un); remove it and retry"
+fi
+exec 9>"$LOCK_FILE"
+flock -w "$LOCK_WAIT" 9 || fail "another deploy is running (no lock on $LOCK_FILE within ${LOCK_WAIT}s); nothing changed"
+
 if [ ! -f "$ENV_FILE" ]; then
-    echo "planner-deploy: $ENV_FILE not found" >&2
-    exit 1
+    fail "$ENV_FILE not found"
 fi
 
 cd "$APP_DIR"
+
+# Every `file:` secret of the stack must exist as a regular file: for a missing one
+# Docker would create an empty directory in its place and start the container with it
+# (e.g. a new secret added to compose.prod.yml before bootstrap.sh generated it).
+while read -r secret; do
+    [ -f "$APP_DIR/$secret" ] || fail "secret file $APP_DIR/$secret is missing or not a regular file (run deploy/bootstrap.sh); nothing changed"
+done < <(sed -nE 's#^[[:space:]]+file:[[:space:]]+\./(secrets/[A-Za-z0-9_.-]+)[[:space:]]*$#\1#p' "$COMPOSE_FILE")
 
 prev_tag="$({ grep -E '^IMAGE_TAG=' "$ENV_FILE" || true; } | tail -n1 | cut -d= -f2-)"
 if [ -z "$prev_tag" ]; then
@@ -58,12 +93,13 @@ if [ -z "$prev_tag" ]; then
     echo "  (the first release is deployed by hand, see docs/runbook.md section 1)" >&2
     exit 1
 fi
-# .env is the rollback target: a value that is not a tag we would accept from
-# CI (hand-edited, `latest`, stray characters) must never be written back and
-# started by the rollback path, so refuse to deploy on top of it at all.
+# .env is the rollback target: a value that is not a ref we would accept from
+# CI (hand-edited, `latest`, a bare mutable tag, stray characters) must never
+# be written back and started by the rollback path, so refuse to deploy on top
+# of it at all.
 if ! [[ "$prev_tag" =~ $TAG_RE ]]; then
-    echo "planner-deploy: current IMAGE_TAG '$prev_tag' in $ENV_FILE is not a valid tag" >&2
-    echo "  (must match $TAG_RE); fix it by hand before deploying" >&2
+    echo "planner-deploy: current IMAGE_TAG '$prev_tag' in $ENV_FILE is not a digest-pinned ref" >&2
+    echo "  (must match $TAG_RE); fix it by hand before deploying (docs/runbook.md section 2)" >&2
     exit 1
 fi
 
@@ -80,10 +116,12 @@ set_tag() {
     fi
 }
 
+# timeout(1) runs a program, not a shell function: docker compose is spelled
+# out wherever a deadline applies.
 wait_healthy() {
     waited=0
     while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
-        if docker compose -f "$COMPOSE_FILE" exec -T app python -c \
+        if timeout -k "$KILL_AFTER" "$PROBE_TIMEOUT" docker compose -f "$COMPOSE_FILE" exec -T app python -c \
             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)" \
             >/dev/null 2>&1; then
             return 0
@@ -94,22 +132,40 @@ wait_healthy() {
     return 1
 }
 
-compose() {
-    docker compose -f "$COMPOSE_FILE" "$@"
+# compose_up <args...>: `docker compose up <args>` bounded by UP_TIMEOUT.
+compose_up() {
+    timeout -k "$KILL_AFTER" "$UP_TIMEOUT" docker compose -f "$COMPOSE_FILE" up "$@"
+}
+
+# timed_out <exit status>: timeout(1) exits 124 on its deadline (137 once -k had to SIGKILL).
+timed_out() {
+    [ "$1" -eq 124 ] || [ "$1" -eq 137 ]
 }
 
 # pg_dump of the live database right before the new release can migrate it:
 # the way back if a migration turns out to be destructive (restore by hand,
-# docs/runbook.md section 2). Written to a .tmp and renamed, so a failed or
-# interrupted dump never looks like a usable snapshot.
+# docs/runbook.md section 2). Written to a mktemp file in the backup dir (a
+# unique name: no two runs, and no run and a leftover, ever share a temp file)
+# and renamed, so a failed or interrupted dump never looks like a usable
+# snapshot. --lock-wait-timeout: pg_dump gives up instead of queueing behind a
+# long exclusive lock (and making everything else queue behind it); timeout
+# bounds the whole dump.
 snapshot_file=""
 snapshot_tmp=""
 snapshot_db() {
     (umask 077 && mkdir -p "$BACKUP_DIR") || return 1
-    snapshot_file="$BACKUP_DIR/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
-    snapshot_tmp="$snapshot_file.tmp"
-    if ! (umask 077 && compose exec -T db pg_dump -U planner_owner -Fc planner > "$snapshot_tmp"); then
-        echo "planner-deploy: pg_dump failed" >&2
+    # Leftovers of runs killed hard enough to skip the trap (SIGKILL, power loss).
+    find "$BACKUP_DIR" -maxdepth 1 -name '.pre-deploy.tmp.*' -mmin +60 -delete 2>/dev/null || true
+    snapshot_tmp="$(umask 077 && mktemp "$BACKUP_DIR/.pre-deploy.tmp.XXXXXXXX")" || return 1
+    dump_status=0
+    timeout -k "$KILL_AFTER" "$SNAPSHOT_TIMEOUT" docker compose -f "$COMPOSE_FILE" exec -T db \
+        pg_dump --lock-wait-timeout=60s -U planner_owner -Fc planner > "$snapshot_tmp" || dump_status=$?
+    if [ "$dump_status" -ne 0 ]; then
+        if timed_out "$dump_status"; then
+            echo "planner-deploy: pg_dump did not finish within ${SNAPSHOT_TIMEOUT}s" >&2
+        else
+            echo "planner-deploy: pg_dump failed (exit $dump_status)" >&2
+        fi
         return 1
     fi
     if [ ! -s "$snapshot_tmp" ]; then
@@ -117,6 +173,9 @@ snapshot_db() {
         return 1
     fi
     chmod 0600 "$snapshot_tmp" || return 1
+    snapshot_file="$BACKUP_DIR/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
+    # Same second as an earlier run's snapshot: keep both.
+    [ ! -e "$snapshot_file" ] || snapshot_file="${snapshot_file%.dump}-${snapshot_tmp##*.}.dump"
     mv "$snapshot_tmp" "$snapshot_file" || return 1
     snapshot_tmp=""
     find "$BACKUP_DIR" -maxdepth 1 -name 'pre-deploy-*.dump' \
@@ -124,19 +183,19 @@ snapshot_db() {
     echo "planner-deploy: pre-deploy snapshot $snapshot_file ($(wc -c < "$snapshot_file") bytes)"
 }
 
-# From the moment .env names the new tag until the new stack is confirmed
-# healthy, ANY exit (a failed command, a failed check, set -e, a signal)
-# restores the previous tag and restarts it. The EXIT trap is the single
-# rollback path, so no failure can leave .env pointing at a tag that was
-# never successfully deployed (the next reboot / `up -d` would start it, and
-# the next deploy would treat it as the rollback target).
+# From the moment .env names the new ref until the new stack is confirmed
+# healthy, ANY exit (a failed command, a failed check, a missed deadline,
+# set -e, a signal) restores the previous ref and restarts it. The EXIT trap
+# is the single rollback path, so no failure can leave .env pointing at a ref
+# that was never successfully deployed (the next reboot / `up -d` would start
+# it, and the next deploy would treat it as the rollback target).
 #
 # The rollback restarts `app` only (`up -d --no-deps app`) and never re-runs
 # `migrate`: if the new release already applied a migration, the previous
 # image's alembic does not know that revision, `alembic upgrade head` would
 # fail, and `app` (depends_on: migrate completed) would never start. That is
 # why migrations must be backward compatible - the previous app has to run
-# on the migrated schema (docs/runbook.md section 2).
+# on the migrated schema (docs/runbook.md section 2; CI checks it).
 env_written=0
 deployed=0
 finish() {
@@ -146,7 +205,7 @@ finish() {
     if [ "$env_written" -eq 1 ] && [ "$deployed" -eq 0 ]; then
         echo "planner-deploy: rolling back to '$prev_tag' (app only, migrations are not re-run)" >&2
         set_tag "$prev_tag" || echo "planner-deploy: FAILED to restore IMAGE_TAG in $ENV_FILE" >&2
-        if ! compose up -d --no-deps app; then
+        if ! compose_up -d --no-deps app; then
             echo "planner-deploy: rollback 'up -d --no-deps app' failed - manual intervention needed" >&2
         elif wait_healthy; then
             echo "planner-deploy: rolled back, '$prev_tag' is healthy" >&2
@@ -162,11 +221,19 @@ trap finish EXIT
 
 echo "planner-deploy: deploying '$new_tag' (previous: '$prev_tag')"
 
-# Pull first, with the tag passed only through the environment (it overrides
-# .env for Compose): if the image is missing or the network fails, .env and
-# the running stack are left exactly as they were.
-if ! IMAGE_TAG="$new_tag" compose pull app migrate; then
-    echo "planner-deploy: pull of '$new_tag' failed; nothing changed (still '$prev_tag')" >&2
+# Pull first, with the ref passed only through the environment (it overrides
+# .env for Compose): if the image is missing, the network fails or the pull
+# hangs past PULL_TIMEOUT, .env and the running stack are left exactly as
+# they were.
+pull_status=0
+IMAGE_TAG="$new_tag" timeout -k "$KILL_AFTER" "$PULL_TIMEOUT" \
+    docker compose -f "$COMPOSE_FILE" pull app migrate || pull_status=$?
+if [ "$pull_status" -ne 0 ]; then
+    if timed_out "$pull_status"; then
+        echo "planner-deploy: pull of '$new_tag' did not finish within ${PULL_TIMEOUT}s; nothing changed (still '$prev_tag')" >&2
+    else
+        echo "planner-deploy: pull of '$new_tag' failed; nothing changed (still '$prev_tag')" >&2
+    fi
     exit 1
 fi
 
@@ -180,8 +247,14 @@ fi
 set_tag "$new_tag"
 env_written=1
 
-if ! compose up -d; then
-    echo "planner-deploy: 'up -d' with '$new_tag' failed" >&2
+up_status=0
+compose_up -d || up_status=$?
+if [ "$up_status" -ne 0 ]; then
+    if timed_out "$up_status"; then
+        echo "planner-deploy: 'up -d' with '$new_tag' did not finish within ${UP_TIMEOUT}s" >&2
+    else
+        echo "planner-deploy: 'up -d' with '$new_tag' failed" >&2
+    fi
     exit 1
 fi
 

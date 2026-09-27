@@ -20,7 +20,21 @@ mkdir -p "$backups" "$stub_dir"
 sed -e "s|^APP_DIR=.*|APP_DIR=\"$work\"|" \
     -e "s|^BACKUP_DIR=.*|BACKUP_DIR=\"$backups\"|" \
     -e "s|^STATUS_FILE=.*|STATUS_FILE=\"$status_file\"|" \
+    -e "s|^OFFSITE_BIN=.*|OFFSITE_BIN=\"$work/offsite-stub\"|" \
     "$script_dir/../backup.sh" > "$work/backup.sh"
+
+# offsite stub (stands in for offsite-backup.sh; installed only for some runs):
+# records its arguments and the backup status it saw, writes offsite_* lines like
+# the real one, fails when OFFSITE_FAILS=1.
+cat > "$work/offsite-stub.src" <<'STUB'
+#!/usr/bin/env bash
+status_file="$(dirname "$0")/state/backup-status"
+echo "offsite $* [saw $(grep '^status=' "$status_file")]" >> "$OFFSITE_LOG"
+[ "${OFFSITE_FAILS:-0}" = 1 ] && exit 3
+{ grep -v '^offsite_' "$status_file"; printf 'offsite_status=ok\noffsite_last_ok=2026-01-01T00:00:00Z\noffsite_file=dumps/x.cms\n'; } > "$status_file.o"
+mv "$status_file.o" "$status_file"
+STUB
+export OFFSITE_LOG="$work/offsite.log"
 
 # docker stub: `pg_dump` writes a few bytes, then fails when DUMP_FAILS=1;
 # writes nothing (and succeeds) when DUMP_EMPTY=1.
@@ -112,6 +126,28 @@ check "failure after a success is recorded" "$(status_field status)" = fail
 run_backup LOGGER_FAILS=1
 check "a failing logger does not fail the backup" "$status" -eq 0
 check "status file is still written when logger fails" "$(status_field status)" = ok
+check "no offsite script installed: nothing else runs" ! -e "$OFFSITE_LOG"
+
+# --- offsite copy ---------------------------------------------------------------------
+cp "$work/offsite-stub.src" "$work/offsite-stub"
+chmod +x "$work/offsite-stub"
+: > "$OFFSITE_LOG"
+run_backup
+check "success runs the offsite copy once, with today's dump" \
+    "$(grep -c "^offsite $backups/$today.dump " "$OFFSITE_LOG")" -eq 1
+check "the offsite copy runs after status=ok is recorded" "$(grep -c '\[saw status=ok\]' "$OFFSITE_LOG")" -eq 1
+check "the offsite copy's status lines are recorded" "$(status_field offsite_status)" = ok
+run_backup
+check "the next backup keeps the offsite lines while rewriting its own" \
+    "$(status_field offsite_last_ok)$(status_field status)" = "2026-01-01T00:00:00Zok"
+run_backup DUMP_FAILS=1
+check "a failed dump keeps the offsite lines" "$(status_field offsite_file)" = dumps/x.cms
+check "a failed dump does not run the offsite copy" "$(grep -c '^offsite ' "$OFFSITE_LOG")" -eq 2
+run_backup OFFSITE_FAILS=1
+check "a failed offsite copy does not fail the local backup" "$status" -eq 0
+check "a failed offsite copy leaves status=ok" "$(status_field status)" = ok
+check "a failed offsite copy is logged as a warning" \
+    "$(grep -c -- "-t gantt-planner-backup -p user.warning -- offsite copy of $backups/$today.dump failed (exit 3)" "$LOGGER_LOG")" -eq 1
 
 echo
 echo "test_backup.sh: $pass passed, $fail failed"

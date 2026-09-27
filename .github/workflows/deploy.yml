@@ -71,6 +71,7 @@ jobs:
           image-ref: ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
           # Block on HIGH too, but only when a fixed version exists (ignore-unfixed): an
           # unfixable base-image CVE would otherwise block every deploy with nothing to do.
+          # So this gate covers FIXABLE HIGH/CRITICAL CVEs only (CI runs the same scan on PRs).
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
@@ -98,6 +99,16 @@ jobs:
           docker buildx imagetools inspect "$IMAGE@$digest" >/dev/null
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "ref=$TAG@$digest" >> "$GITHUB_OUTPUT"
+          # The server only accepts digest-pinned refs: keep this one findable for manual
+          # deploys and rollbacks (docs/runbook.md section 2).
+          echo "pushed $IMAGE:$TAG@$digest"
+          {
+            echo "### Image"
+            echo
+            echo "\`$IMAGE:$TAG@$digest\`"
+            echo
+            echo "Deploy / roll back to exactly this image: \`ssh deploy@<host> $TAG@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy over SSH
         env:

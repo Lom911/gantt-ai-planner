@@ -15,6 +15,13 @@
 #   size_bytes=183422              (0 on failure)
 #   file=/var/backups/gantt-planner/2026-09-27.dump
 #   last_ok=2026-09-27T03:15:04Z   (kept across failures: how stale the newest good dump is)
+# The app reads this file (read-only mount) for GET /api/ops/status.
+#
+# After a successful dump, the offsite copy runs (OFFSITE_BIN =
+# deploy/offsite-backup.sh: encrypted to a public key, pushed to a private
+# GitHub repository). Its outcome is logged under its own syslog tag and kept
+# as offsite_* lines in STATUS_FILE; it never turns a good local backup into a
+# failed one.
 set -euo pipefail
 
 APP_DIR=/opt/gantt-planner
@@ -23,6 +30,8 @@ BACKUP_DIR=/var/backups/gantt-planner
 STATUS_FILE=/var/lib/gantt-planner/backup-status
 LOG_TAG=gantt-planner-backup
 RETENTION_DAYS=7
+OFFSITE_BIN=/usr/local/bin/gantt-planner-offsite-backup.sh
+OFFSITE_TIMEOUT=900
 
 # Dumps hold every user's data: created 0600 from the first byte.
 umask 077
@@ -43,8 +52,12 @@ write_status() {
     (
         umask 022
         mkdir -p "$(dirname "$STATUS_FILE")"
-        printf 'timestamp=%s\nstatus=%s\nexit_code=%s\nsize_bytes=%s\nfile=%s\nlast_ok=%s\n' \
-            "$now" "$status_word" "$exit_code" "$size" "$file" "$last_ok" > "$STATUS_FILE.tmp"
+        {
+            printf 'timestamp=%s\nstatus=%s\nexit_code=%s\nsize_bytes=%s\nfile=%s\nlast_ok=%s\n' \
+                "$now" "$status_word" "$exit_code" "$size" "$file" "$last_ok"
+            # The offsite copy's lines (offsite-backup.sh) outlive this rewrite.
+            grep '^offsite_' "$STATUS_FILE" 2>/dev/null || true
+        } > "$STATUS_FILE.tmp"
         mv -f "$STATUS_FILE.tmp" "$STATUS_FILE"
     ) 2>/dev/null || echo "gantt-planner backup: could not write $STATUS_FILE" >&2
 }
@@ -60,6 +73,11 @@ finish() {
         size="$(wc -c < "$dump_file" | tr -d ' ')"
         log info "ok: wrote $dump_file ($size bytes), pruned dumps older than ${RETENTION_DAYS} days"
         write_status ok 0 "$size" "$dump_file" "$now"
+        # Offsite copy of this dump: best effort and bounded; exits 0 when not configured.
+        if [ -x "$OFFSITE_BIN" ]; then
+            timeout -k 30 "$OFFSITE_TIMEOUT" "$OFFSITE_BIN" "$dump_file" ||
+                log warning "offsite copy of $dump_file failed (exit $?); see journalctl -t gantt-planner-offsite"
+        fi
     else
         prev_ok="$({ grep -E '^last_ok=' "$STATUS_FILE" 2>/dev/null || true; } | tail -n1 | cut -d= -f2-)"
         log err "FAILED (exit $status): no new dump; last good backup: ${prev_ok:-never}; see /var/log/gantt-planner-backup.log"

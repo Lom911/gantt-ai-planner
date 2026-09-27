@@ -60,12 +60,11 @@ run_case() {
     pass=$((pass + 1))
 }
 
-run_case "valid short sha tag" \
-    "sha-abc1234" 0 "sudo /usr/local/bin/planner-deploy sha-abc1234"
-run_case "valid full-length sha tag" \
-    "sha-0123456789abcdef0123456789abcdef01234567" 0 \
-    "sudo /usr/local/bin/planner-deploy sha-0123456789abcdef0123456789abcdef01234567"
 digest="sha256:$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+# Bare tags are mutable in GHCR: refused, for manual deploys and rollbacks too.
+run_case "bare short sha tag rejected (no digest)" "sha-abc1234" 1
+run_case "bare full-length sha tag rejected (no digest)" \
+    "sha-0123456789abcdef0123456789abcdef01234567" 1
 run_case "valid short sha tag pinned by digest" \
     "sha-abc1234@$digest" 0 "sudo /usr/local/bin/planner-deploy sha-abc1234@$digest"
 run_case "valid full-length sha tag pinned by digest" \
@@ -83,10 +82,13 @@ run_case "digest followed by an extra token rejected" "sha-abc1234@$digest extra
 run_case "digest split off as a second token rejected" "sha-abc1234 @$digest" 1
 run_case "empty command rejected" "" 1
 run_case "wrong prefix rejected" "latest" 1
-run_case "hex too short rejected" "sha-abc12" 1
-run_case "uppercase hex rejected" "sha-ABC1234" 1
-run_case "extra token rejected" "sha-abc1234 extra" 1
-run_case "shell metacharacters rejected" "sha-abc1234; rm -rf /" 1
+run_case "wrong prefix with a digest rejected" "latest@$digest" 1
+run_case "hex too short rejected" "sha-abc12@$digest" 1
+run_case "hex too long rejected" "sha-0123456789abcdef0123456789abcdef012345678@$digest" 1
+run_case "uppercase hex rejected" "sha-ABC1234@$digest" 1
+run_case "extra token rejected" "sha-abc1234@$digest extra" 1
+run_case "shell metacharacters rejected" "sha-abc1234@$digest; rm -rf /" 1
+run_case "glob character rejected" "sha-abc123*@$digest" 1
 # Single-quoted on purpose: we want the literal string passed through,
 # not expanded by this test script's own shell.
 # shellcheck disable=SC2016
