@@ -286,6 +286,27 @@ check "the earlier snapshot is not overwritten" \
 check "the new snapshot gets a unique name next to it" \
     "$(find "$backups" -maxdepth 1 -name 'pre-deploy-20260101T000000Z-*.dump' | wc -l | tr -d ' ')" -eq 1
 
+# Every file secret of compose.prod.yml must exist as a regular file before anything
+# happens - otherwise Docker would create a directory in its place.
+seed_secrets() {
+    printf '%s\n' 'secrets:' '  db_app_password:' '    file: ./secrets/db_app_password' \
+        '  ops_token:' '    file: ./secrets/ops_token' > "$app_dir/compose.prod.yml"
+    rm -rf "$app_dir/secrets"
+    mkdir -p "$app_dir/secrets"
+    : > "$app_dir/secrets/db_app_password"
+}
+PREPARE=seed_secrets
+run_case "a missing secret file aborts before any docker call" 1 "$prev" "" "docker|compose|TIMEOUT"
+check "missing secret file is reported" "$(out_has "secret file $app_dir/secrets/ops_token is missing")" -eq 1
+seed_secret_dir() { seed_secrets && mkdir "$app_dir/secrets/ops_token"; }
+PREPARE=seed_secret_dir
+run_case "a directory in place of a secret file aborts before any docker call" 1 "$prev" "" "docker|compose|TIMEOUT"
+seed_all_secrets() { seed_secrets && : > "$app_dir/secrets/ops_token"; }
+PREPARE=seed_all_secrets
+run_case "all secret files present: deploy proceeds" 0 "$new" "up -d \[tag=$new\]" ""
+PREPARE=:
+: > "$app_dir/compose.prod.yml"
+
 # A held lock: the second deploy gives up after LOCK_WAIT without reading
 # .env, calling docker or writing a snapshot.
 PREPARE=hold_lock

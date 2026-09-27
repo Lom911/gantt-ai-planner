@@ -80,6 +80,13 @@ fi
 
 cd "$APP_DIR"
 
+# Every `file:` secret of the stack must exist as a regular file: for a missing one
+# Docker would create an empty directory in its place and start the container with it
+# (e.g. a new secret added to compose.prod.yml before bootstrap.sh generated it).
+while read -r secret; do
+    [ -f "$APP_DIR/$secret" ] || fail "secret file $APP_DIR/$secret is missing or not a regular file (run deploy/bootstrap.sh); nothing changed"
+done < <(sed -nE 's#^[[:space:]]+file:[[:space:]]+\./(secrets/[A-Za-z0-9_.-]+)[[:space:]]*$#\1#p' "$COMPOSE_FILE")
+
 prev_tag="$({ grep -E '^IMAGE_TAG=' "$ENV_FILE" || true; } | tail -n1 | cut -d= -f2-)"
 if [ -z "$prev_tag" ]; then
     echo "planner-deploy: could not read current IMAGE_TAG from $ENV_FILE" >&2

@@ -187,30 +187,57 @@ EOF
     fi
 }
 
+# generate_secret <name> <openssl rand args...>: creates $SECRETS_DIR/<name> (0444,
+# root) from `openssl rand <args>` unless it already exists. Returns 0 if it generated
+# the file, 1 if it was already there; exits the script if generation fails.
+generate_secret() {
+    local name="$1" secret_file tmp_secret
+    shift
+    secret_file="$SECRETS_DIR/$name"
+    if [ -f "$secret_file" ]; then
+        echo "    $secret_file already exists, leaving it untouched"
+        return 1
+    fi
+    # A compose `up` that ran while the file was missing makes Docker create an (empty)
+    # directory in its place; only an empty one is removed.
+    if [ -d "$secret_file" ]; then
+        if rmdir "$secret_file" 2>/dev/null; then
+            echo "    removed the empty directory Docker created in place of the missing $secret_file"
+        else
+            echo "    $secret_file is a non-empty directory, not a secret file - fix by hand, aborting" >&2
+            exit 1
+        fi
+    fi
+    # Generate into a temp file in the same directory and rename it into place only
+    # once it is complete and non-empty: a failed/killed openssl must never leave an
+    # empty secret file behind, which the next run would treat as existing (Postgres
+    # would initialise the role with an empty password, the ops endpoint would accept
+    # an empty token).
+    # Every step is checked explicitly: callers use `if`/`||`, which suspends set -e here.
+    if tmp_secret="$(mktemp "$SECRETS_DIR/.$name.XXXXXX")" &&
+        (umask 177 && openssl rand "$@" > "$tmp_secret") && [ -s "$tmp_secret" ] &&
+        chmod 0444 "$tmp_secret" && chown root:root "$tmp_secret" &&
+        mv -f "$tmp_secret" "$secret_file"; then
+        echo "    generated $secret_file"
+        return 0
+    fi
+    [ -z "${tmp_secret:-}" ] || rm -f "$tmp_secret"
+    echo "    FAILED to generate $secret_file (openssl rand), aborting" >&2
+    exit 1
+}
+
 step_secrets() {
     echo "==> Generating database secrets (only if missing)"
     for name in db_app_password db_owner_password pg_superuser_password; do
-        secret_file="$SECRETS_DIR/$name"
-        if [ ! -f "$secret_file" ]; then
-            # Generate into a temp file in the same directory and rename it into place
-            # only once it is complete and non-empty: a failed/killed openssl must never
-            # leave an empty secret file behind, which the next run would treat as
-            # existing and Postgres would then initialise the role with an empty password.
-            tmp_secret="$(mktemp "$SECRETS_DIR/.$name.XXXXXX")"
-            if (umask 177 && openssl rand -base64 32 > "$tmp_secret") && [ -s "$tmp_secret" ]; then
-                chmod 0444 "$tmp_secret"
-                chown root:root "$tmp_secret"
-                mv -f "$tmp_secret" "$secret_file"
-            else
-                rm -f "$tmp_secret"
-                echo "    FAILED to generate $secret_file (openssl rand), aborting" >&2
-                exit 1
-            fi
-            echo "    generated $secret_file"
-        else
-            echo "    $secret_file already exists, leaving it untouched"
-        fi
+        generate_secret "$name" -base64 32 || true
     done
+
+    echo "==> Generating the ops endpoint token (only if missing)"
+    if generate_secret ops_token -hex 32; then
+        echo "    ACTION NEEDED: copy it into the GitHub Actions secret OPS_TOKEN (Settings -> Secrets"
+        echo "    and variables -> Actions) so the Uptime workflow can read /api/ops/status:"
+        echo "      cat $SECRETS_DIR/ops_token   # paste the value; do not put it in a command line"
+    fi
 
     echo "==> Ensuring anthropic_api_key secret placeholder exists"
     anthropic_file="$SECRETS_DIR/anthropic_api_key"
@@ -286,6 +313,7 @@ main() {
     echo "      1. fill in $SECRETS_DIR/openrouter_api_key (default: LLM_PROVIDER=openrouter in"
     echo "         $APP_DIR/.env) or $SECRETS_DIR/anthropic_api_key if using a real Anthropic key instead"
     echo "      2. add the CI deploy key to /home/$DEPLOY_USER/.ssh/authorized_keys (see step above)"
+    echo "         and copy $SECRETS_DIR/ops_token into the GitHub Actions secret OPS_TOKEN"
     echo "      3. point the gantt-ai-planner.duckdns.org A record at this host's IP"
     echo "      4. run the first deploy manually with a digest-pinned ref (docs/runbook.md section 1);"
     echo "         the digest: docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<commit> --format '{{json .Manifest}}'"
