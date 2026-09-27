@@ -4,7 +4,7 @@ A small set of chat scenarios run against a **deployed** app with a **real LLM**
 regressions in the agent's behaviour (prompt, tools, model changes) that the deterministic
 test suite with the fake LLM can't see.
 
-**Not part of pytest or CI.** pytest only collects `tests/`; nothing here runs automatically.
+**Not part of pytest.** pytest only collects `tests/`. It runs on a schedule instead: `.github/workflows/evals.yml` (weekly + manual dispatch) runs it against production and opens/closes an issue labelled `evals`. Each run costs ~6 sessions and ~7 chat messages on the real LLM.
 Every run costs LLM tokens and uses the target's per-IP limits.
 
 ## Run

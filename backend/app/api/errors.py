@@ -16,6 +16,7 @@ STATUS = {
     "nothing_to_redo": 409,
     "rate_limited": 429,
     "no_session": 401,
+    "unauthorized": 401,
     "not_found": 404,
     "bad_origin": 403,
     "file_too_large": 413,

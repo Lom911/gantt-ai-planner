@@ -31,11 +31,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-      # Known vulnerabilities in the exact locked production dependencies (no dev deps): the
-      # hashed export lets pip-audit check the pins without resolving or installing anything.
-      - name: Audit production dependencies (pip-audit)
+      # Known vulnerabilities in the exact locked dependencies - production AND dev (pytest,
+      # mypy, ruff... run here with the repository checked out): the hashed export lets
+      # pip-audit check the pins without resolving or installing anything.
+      - name: Audit locked dependencies incl. dev (pip-audit)
         run: |
-          uv export --frozen --no-dev --no-emit-project --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
+          uv export --frozen --no-emit-project --format requirements-txt > "$RUNNER_TEMP/requirements.txt"
           uvx pip-audit@2.10.1 --strict --disable-pip --require-hashes --progress-spinner off -r "$RUNNER_TEMP/requirements.txt"
       - run: uv sync --frozen
       - run: uv run ruff check . && uv run ruff format --check .
@@ -54,8 +55,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: 26, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci
-      # Runtime (bundled) dependencies only; dev tooling never reaches the image.
-      - run: npm audit --omit=dev --audit-level=high
+      # All dependencies, dev tooling included: it never reaches the image, but it runs here
+      # (and on developers' machines) with the repository checked out.
+      - run: npm audit --audit-level=high
       - run: npm run lint && npm run typecheck && npm test && npm run build
   e2e:
     runs-on: ubuntu-latest
@@ -64,6 +66,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: docker compose --profile full up -d --build --wait
+      # The image this job just built (from the same Dockerfile as the release image): the
+      # N-1 migration check below runs its migrations.
+      - name: Tag the built app image
+        id: image
+        run: |
+          set -euo pipefail
+          docker tag "$(docker inspect -f '{{.Image}}' "$(docker compose --profile full ps -q app)")" gantt-ai-planner:ci
+          docker image ls gantt-ai-planner:ci
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: 26, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci && npx playwright install --with-deps chromium && npm run e2e
@@ -73,12 +83,54 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: playwright-report, path: frontend/test-results }
+      # N-1 migration compatibility (docs/runbook.md section 2): a failed deploy rolls back
+      # to the previous image WITHOUT undoing migrations, so the previous release must run on
+      # the schema this commit migrates to. The previous release = the image of the base
+      # commit (PR base / the commit before this push). Runs even if the browser tests failed.
+      - name: Find the previous release's image
+        id: prev
+        if: ${{ !cancelled() && steps.image.outcome == 'success' }}
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BASE_SHA" =~ ^0+$ ]]; then
+            echo "::notice title=N-1 migration check skipped::no base commit for this event ('${BASE_SHA}')"
+            exit 0
+          fi
+          ref="ghcr.io/alomaev-hue/gantt-ai-planner:sha-${BASE_SHA:0:7}"
+          if ! err="$(docker buildx imagetools inspect "$ref" 2>&1 >/dev/null)"; then
+            if grep -qiE 'not found|no such manifest|manifest unknown' <<< "$err"; then
+              echo "::notice title=N-1 migration check skipped::$ref does not exist (the base commit was never released)"
+              exit 0
+            fi
+            echo "::error::could not look up $ref: $err"
+            exit 1
+          fi
+          docker pull -q "$ref"
+          echo "image=$ref" >> "$GITHUB_OUTPUT"
+      - name: N-1 migration check (new migrations, previous app)
+        if: ${{ !cancelled() && steps.prev.outputs.image != '' }}
+        env:
+          PREV_IMAGE: ${{ steps.prev.outputs.image }}
+        run: bash scripts/migration-compat.sh gantt-ai-planner:ci "$PREV_IMAGE"
+      # Same gate as the Deploy workflow, but already on the PR. It covers FIXABLE HIGH and
+      # CRITICAL CVEs only (ignore-unfixed): unfixed CVEs and MEDIUM/LOW never block - they
+      # would block every build with nothing to do.
+      - name: Scan the built image (Trivy, fixable HIGH/CRITICAL)
+        if: ${{ !cancelled() && steps.image.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: gantt-ai-planner:ci
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
   deploy-scripts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      - run: shellcheck deploy/*.sh deploy/planner-deploy deploy/planner-deploy-wrapper deploy/initdb/*.sh deploy/tests/*.sh
+      - run: shellcheck deploy/*.sh deploy/planner-deploy deploy/planner-deploy-wrapper deploy/initdb/*.sh deploy/tests/*.sh scripts/*.sh
       - run: for t in deploy/tests/test_*.sh; do bash "$t"; done
   gitleaks:
     runs-on: ubuntu-latest

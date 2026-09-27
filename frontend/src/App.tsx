@@ -10,6 +10,8 @@ import { useTheme } from "@/hooks/useTheme";
 import { SplitLayout } from "@/components/SplitLayout";
 import { GanttView } from "@/components/gantt/GanttView";
 import { GanttLegend } from "@/components/gantt/GanttLegend";
+import { ConfirmationBanner } from "@/components/ConfirmationBanner";
+import { useConfirmation } from "@/hooks/useConfirmation";
 import { loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layoutPrefs";
 import { ProjectDates } from "@/components/gantt/ProjectDates";
 import { ChatPanel } from "@/components/chat/ChatPanel";
@@ -36,6 +38,7 @@ function App() {
   // session-wide event bus, so this is the single source of highlighted ids (a click in the
   // chat's diff summary sets it too, via `onFocusTask` below). The highlight clears after
   // HIGHLIGHT_MS; imports/resets report no ids (see parsePlanChanged).
+  const { data: pendingConfirmation } = useConfirmation();
   const { agentBusy } = useSessionEvents((ids) => {
     if (ids.length) flashFocused(ids);
   });
@@ -87,6 +90,7 @@ function App() {
           onTheme={setTheme}
         />
       )}
+      <ConfirmationBanner pending={pendingConfirmation} />
       <main className="min-h-0 flex-1">
         {isLoading && <div className="p-4 text-muted-foreground">Загрузка плана…</div>}
         {isError && (

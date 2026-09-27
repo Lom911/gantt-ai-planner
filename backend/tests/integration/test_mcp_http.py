@@ -71,7 +71,11 @@ async def test_apply_operations_over_http_increments_version_and_publishes_mcp_e
 
     async with _mcp_client(app, token) as client:
         result = await client.call_tool(
-            "apply_operations", {"operations": [{"op": "move_task", "id": 1, "shift_days": 1}]}
+            "apply_operations",
+            {
+                "operations": [{"op": "move_task", "id": 1, "shift_days": 1}],
+                "expected_version": before.version,
+            },
         )
     assert not result.is_error, result.content
     assert result.structured_content["version"] == before.version + 1
@@ -85,20 +89,39 @@ async def test_apply_operations_over_http_increments_version_and_publishes_mcp_e
     assert after.version == before.version + 1
 
 
-async def test_external_mcp_client_confirms_mass_delete_itself(app, session_client):
-    # The in-app agent's «only the user's own yes confirms» guard doesn't apply here: an
-    # external client is the user's own tool, its confirmed=true goes straight to the server.
+async def test_external_mcp_mass_delete_needs_approval_in_the_browser(app, session_client):
+    # An external client's own confirmed=true proves nothing (the model behind it can be talked
+    # into setting it): the user approves the exact batch in the web app, then the client's
+    # confirmed=true of that batch runs it.
     token = await _issue_token(session_client)
+    session_id = await app.state.service.resolve_session(session_client.cookies.get("sid"))
+    queue = app.state.service.bus.subscribe(session_id)
     ops = [{"op": "delete_task", "id": i} for i in range(1, 7)]
     async with _mcp_client(app, token) as client:
         refused = await client.call_tool(
-            "apply_operations", {"operations": ops}, raise_on_error=False
+            "apply_operations", {"operations": ops, "expected_version": 1}, raise_on_error=False
         )
+        assert refused.is_error and "confirmation_required" in refused.content[0].text
+        assert "веб-приложении" in refused.content[0].text
+        early = await client.call_tool(
+            "apply_operations",
+            {"operations": ops, "confirmed": True, "expected_version": 1},
+            raise_on_error=False,
+        )
+        assert early.is_error and "ещё не подтверждено" in early.content[0].text
+
+        pending = (await session_client.get("/api/plan/confirmation")).json()
+        assert pending["origin"] == "mcp" and pending["count"] == 6 and not pending["approved"]
+        event = queue.get_nowait()
+        assert event["type"] == "confirmation_pending" and event["id"] == pending["id"]
+        approve = await session_client.post(f"/api/plan/confirmation/{pending['id']}/approve")
+        assert approve.status_code == 200
+
         confirmed = await client.call_tool(
-            "apply_operations", {"operations": ops, "confirmed": True}
+            "apply_operations", {"operations": ops, "confirmed": True, "expected_version": 1}
         )
-    assert refused.is_error and "confirmation_required" in refused.content[0].text
     assert not confirmed.is_error and confirmed.structured_content["version"] == 2
+    assert len((await app.state.service.get_state(session_id)).plan.tasks) == 19
 
 
 async def test_bad_token_is_rejected(app, session_client):
@@ -265,3 +288,134 @@ async def test_mcp_activity_keeps_the_session_alive(app, session_client):
     async with app.state.sessionmaker() as db:
         age = (await db.execute(text("SELECT now() - last_seen_at FROM sessions"))).scalar_one()
     assert age.total_seconds() < 60
+
+
+async def _activity_ages(app: Any) -> tuple[float, float]:
+    from sqlalchemy import text
+
+    async with app.state.sessionmaker() as db:
+        token_age = (
+            await db.execute(text("SELECT now() - last_used_at FROM mcp_tokens"))
+        ).scalar_one()
+        session_age = (
+            await db.execute(text("SELECT now() - last_seen_at FROM sessions"))
+        ).scalar_one()
+    return token_age.total_seconds(), session_age.total_seconds()
+
+
+async def test_mcp_activity_is_written_at_most_every_ten_minutes(app, session_client):
+    # Every MCP request verifies the token; rewriting last_used_at and last_seen_at on each one
+    # is a WAL write per request for timestamps that only matter at the scale of days.
+    from sqlalchemy import text
+
+    token = await _issue_token(session_client)
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE mcp_tokens SET last_used_at = now() - interval '1 minute'"))
+        await db.execute(text("UPDATE sessions SET last_seen_at = now() - interval '1 minute'"))
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    token_age, session_age = await _activity_ages(app)
+    assert token_age >= 50 and session_age >= 50  # fresh enough: left alone
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE mcp_tokens SET last_used_at = now() - interval '11 minutes'"))
+        await db.execute(text("UPDATE sessions SET last_seen_at = now() - interval '11 minutes'"))
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    token_age, session_age = await _activity_ages(app)
+    assert token_age < 10 and session_age < 10  # stale: touched
+
+
+async def _live_token_prefixes(app: Any) -> list[str]:
+    from sqlalchemy import text
+
+    async with app.state.sessionmaker() as db:
+        rows = await db.execute(text("SELECT prefix FROM mcp_tokens WHERE revoked_at IS NULL"))
+    return list(rows.scalars().all())
+
+
+def _slow_revoke(monkeypatch: Any) -> asyncio.Event:
+    """Widen the window between «revoke the old tokens» and «insert the new one», so two
+    unserialized requests would both revoke before either inserts. The returned event is set
+    once a revoke has run (its transaction still open)."""
+    from app.db import repo
+
+    real = repo.revoke_mcp_tokens
+    revoking = asyncio.Event()
+
+    async def slow(db: Any, session_id: Any, now: Any) -> None:
+        await real(db, session_id, now)
+        revoking.set()
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(repo, "revoke_mcp_tokens", slow)
+    return revoking
+
+
+async def _warm_pool(app: Any, n: int = 4) -> None:
+    """Pooled connections ready, so no racer is delayed by opening one (which lets the other
+    finish first and hides the race)."""
+    from sqlalchemy import text
+
+    dbs = [app.state.sessionmaker() for _ in range(n)]
+    await asyncio.gather(*(db.execute(text("SELECT 1")) for db in dbs))
+    for db in dbs:
+        await db.close()
+
+
+async def test_concurrent_token_issues_leave_exactly_one_live_token(
+    app, session_client, monkeypatch
+):
+    await _warm_pool(app)
+    _slow_revoke(monkeypatch)
+    responses = await asyncio.gather(*(session_client.post("/api/mcp-token") for _ in range(3)))
+    assert [r.status_code for r in responses] == [200, 200, 200]
+    live = await _live_token_prefixes(app)
+    assert len(live) == 1
+    assert live[0] in {r.json()["token"][:12] for r in responses}
+
+
+async def test_revoke_during_an_issue_also_revokes_the_new_token(app, session_client, monkeypatch):
+    # Unserialized, the revoke's UPDATE waited on the old token's row lock, then skipped the
+    # token the issue had just inserted (not in its snapshot): «Отключить» answered 204 while
+    # a live token remained.
+    await _issue_token(session_client)
+    await _warm_pool(app)
+    revoking = _slow_revoke(monkeypatch)
+    issue = asyncio.create_task(session_client.post("/api/mcp-token"))
+    await revoking.wait()  # the issue is inside its transaction
+    revoked = await session_client.delete("/api/mcp-token")
+    issued = await issue
+    assert issued.status_code == 200 and revoked.status_code == 204
+    assert await _live_token_prefixes(app) == []
+
+
+async def test_external_edits_must_say_which_version_they_build_on(app, session_client):
+    # Optimistic concurrency for external clients: without expected_version an edit computed
+    # on a stale get_plan would silently overwrite what the user did in the browser meanwhile.
+    token = await _issue_token(session_client)
+    move = [{"op": "move_task", "id": 1, "shift_days": 1}]
+    async with _mcp_client(app, token) as client:
+        plan = await client.call_tool("get_plan", {})
+        assert "Версия плана: 1" in plan.content[0].text
+        task = await client.call_tool("get_task", {"id": 1})
+        assert task.structured_content["version"] == 1
+
+        missing = await client.call_tool(
+            "apply_operations", {"operations": move}, raise_on_error=False
+        )
+        assert missing.is_error and "expected_version" in missing.content[0].text
+        assert "get_plan" in missing.content[0].text
+        ok = await client.call_tool("apply_operations", {"operations": move, "expected_version": 1})
+        assert ok.structured_content["version"] == 2
+        stale = await client.call_tool(
+            "apply_operations", {"operations": move, "expected_version": 1}, raise_on_error=False
+        )
+        assert stale.is_error and "version_conflict" in stale.content[0].text
+        assert "текущая 2" in stale.content[0].text
+
+        no_version_undo = await client.call_tool("undo", {}, raise_on_error=False)
+        assert no_version_undo.is_error and "expected_version" in no_version_undo.content[0].text
+        stale_undo = await client.call_tool("undo", {"expected_version": 1}, raise_on_error=False)
+        assert stale_undo.is_error and "version_conflict" in stale_undo.content[0].text
+        undone = await client.call_tool("undo", {"expected_version": 2})
+        assert undone.structured_content["version"] == 1

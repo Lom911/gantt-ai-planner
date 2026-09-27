@@ -160,6 +160,7 @@ class FakeLLM:
         system: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         messages: list[dict[str, Any]],
+        max_tokens: int | None = None,  # canned replies are short; nothing to cap
     ) -> AsyncIterator[LLMEvent]:
         result = self._respond(system, messages)
         for i in range(0, len(result.text), _CHUNK):

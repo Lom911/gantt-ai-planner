@@ -1,0 +1,14 @@
+# /etc/gantt-planner/offsite.conf (root:root 0600), read by
+# /usr/local/bin/gantt-planner-offsite-backup.sh (deploy/offsite-backup.sh).
+# Plain KEY=value lines; nothing here is executed.
+
+# SSH URL of the PRIVATE GitHub repository that receives the encrypted dumps. Its deploy
+# key (with write access) is /etc/gantt-planner/backup-deploy-key.
+OFFSITE_REPO=git@github.com:<owner>/gantt-ai-planner-backups.git
+
+# Branch to push to (created on the first push if the repository is empty).
+OFFSITE_BRANCH=main
+
+# How many encrypted dumps dumps/*.cms to keep in the tree (older ones stay in the git
+# history). Default: 30.
+#OFFSITE_KEEP=30

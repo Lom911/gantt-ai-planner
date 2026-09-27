@@ -1,12 +1,15 @@
 name: Uptime
 
-# External uptime check of production with alerting through GitHub issues:
-# - failure (after retries) -> opens an issue labelled `uptime`, or comments on
-#   the one already open, and fails the run (GitHub also emails the failure);
-# - success -> closes any open `uptime` issue with a recovery comment.
-# Scheduled runs only happen on the default branch and may start late when
-# Actions is busy; GitHub disables schedules after 60 days without repository
-# activity (re-enable in the Actions tab). See docs/runbook.md section 6.
+# External uptime + operational-metrics check of production with alerting through GitHub
+# issues:
+# - /healthz and /api/meta from outside (after retries), and the authenticated
+#   /api/ops/status (5xx rate, p95 latency, LLM tokens today, free disk, nightly backup);
+# - any problem -> opens an issue labelled `uptime`, or comments on the one already open,
+#   with the reasons, and fails the run (GitHub also emails the failure);
+# - all fine -> closes any open `uptime` issue with a recovery comment.
+# Scheduled runs only happen on the default branch and may start late when Actions is
+# busy; GitHub disables schedules after 60 days without repository activity (re-enable in
+# the Actions tab). See docs/runbook.md section 6.
 
 on:
   schedule:
@@ -38,7 +41,8 @@ jobs:
         run: |
           # Actions starts steps with `bash -e`: switch it off, every failure here is handled.
           set +e -uo pipefail
-          report="$RUNNER_TEMP/uptime-report.md"
+          problems_file="$RUNNER_TEMP/probe-problems.md"
+          : > "$problems_file"
 
           # check_once: 0 if both endpoints are fine, else 1 with the reasons in $problems.
           check_once() {
@@ -77,29 +81,132 @@ jobs:
             printf '%s' "$problems"
             [ "$attempt" -lt "$ATTEMPTS" ] && sleep "$RETRY_DELAY"
           done
-
-          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          if [ "$healthy" = true ]; then
-            printf 'Production is healthy again as of %s (%s).\n' "$now" "$RUN_URL" > "$report"
-          else
-            {
-              printf 'Uptime check failed at **%s** after %s attempts %ss apart (%s).\n\n' \
-                "$now" "$ATTEMPTS" "$RETRY_DELAY" "$RUN_URL"
-              printf 'Last attempt:\n\n%s\n' "$problems"
-              printf '%s\n' 'Runbook: docs/runbook.md, section 6 (uptime monitoring).'
-            } > "$report"
-          fi
+          [ "$healthy" = true ] || printf '%s' "$problems" > "$problems_file"
           echo "healthy=$healthy" >> "$GITHUB_OUTPUT"
+
+      # GET /api/ops/status (bearer OPS_TOKEN = secrets/ops_token on the server) returns
+      # {"window_minutes":15,"requests":N,"errors_5xx":N,"error_rate":F,"p95_ms":F,
+      #  "tokens_today":N,"chat_messages_today":N,"disk_free_ratio":F,
+      #  "backup":{"status":"ok"|"fail"|"unknown","last_ok":ISO|null,"age_hours":F|null}}.
+      # No secret -> skipped with a notice; 404 -> endpoint not deployed yet (notice).
+      - name: Check operational metrics (/api/ops/status)
+        id: ops
+        if: ${{ !cancelled() }}
+        env:
+          OPS_TOKEN: ${{ secrets.OPS_TOKEN }}
+        run: |
+          set +e -uo pipefail
+          problems_file="$RUNNER_TEMP/ops-problems.md"
+          : > "$problems_file"
+          problem() { printf -- '- %s\n' "$1" >> "$problems_file"; }
+
+          if [ -z "${OPS_TOKEN:-}" ]; then
+            echo "::notice title=Ops check skipped::the OPS_TOKEN secret is not set (docs/runbook.md section 6)"
+            exit 0
+          fi
+          # The header goes through a 0600 file, not the command line (visible in ps).
+          auth="$RUNNER_TEMP/ops-auth"
+          (umask 077 && printf 'Authorization: Bearer %s\n' "$OPS_TOKEN" > "$auth")
+          body="$RUNNER_TEMP/ops.json"
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            code="$(curl -sS -o "$body" -w '%{http_code}' --max-time 15 -H @"$auth" \
+              "$BASE_URL/api/ops/status" 2>"$RUNNER_TEMP/ops-curl.err")" || code="000"
+            case "$code" in
+              000 | 5??) [ "$attempt" -lt "$ATTEMPTS" ] && { sleep "$RETRY_DELAY"; continue; } ;;
+            esac
+            break
+          done
+          rm -f "$auth"
+
+          case "$code" in
+            200) ;;
+            404)
+              echo "::notice title=Ops check skipped::$BASE_URL/api/ops/status answers 404 (endpoint not deployed yet)"
+              exit 0 ;;
+            401 | 403)
+              problem "\`/api/ops/status\`: HTTP $code - the OPS_TOKEN secret does not match /opt/gantt-planner/secrets/ops_token (docs/runbook.md section 3)"
+              exit 0 ;;
+            *)
+              problem "\`/api/ops/status\`: HTTP $code $(head -c 200 "$RUNNER_TEMP/ops-curl.err" | tr '\n' ' ')"
+              exit 0 ;;
+          esac
+          if ! jq -e 'type == "object" and (.backup | type) == "object"' "$body" >/dev/null 2>&1; then
+            problem "\`/api/ops/status\`: HTTP 200 but unexpected body: \`$(head -c 200 "$body" | tr -d '\n`')\`"
+            exit 0
+          fi
+          jq -r '"requests=\(.requests) errors_5xx=\(.errors_5xx) error_rate=\(.error_rate) p95_ms=\(.p95_ms) tokens_today=\(.tokens_today) chat_messages_today=\(.chat_messages_today) disk_free_ratio=\(.disk_free_ratio) backup=\(.backup.status) last_ok=\(.backup.last_ok) age_hours=\(.backup.age_hours)"' "$body"
+          # Thresholds (docs/runbook.md section 6). Null-guarded: in jq, null < 0.1 is true.
+          jq -r '
+            def pct: (. * 1000 | round) / 10;
+            def win: "the last \(.window_minutes // "?") min";
+            (if (.requests // 0) >= 20 and (.error_rate // 0) > 0.05 then
+              "- 5xx error rate \(.error_rate | pct)% (\(.errors_5xx // "?") of \(.requests) requests in \(win)) > 5%" else empty end),
+            (if (.p95_ms // 0) > 3000 then
+              "- p95 latency \(.p95_ms | round) ms over \(win) > 3000 ms" else empty end),
+            (if (.tokens_today // 0) > 3000000 then
+              "- LLM tokens spent today: \(.tokens_today) > 3000000 (\(.chat_messages_today // "?") chat messages)" else empty end),
+            (if .disk_free_ratio != null and .disk_free_ratio < 0.10 then
+              "- free disk space: \(.disk_free_ratio | pct)% < 10%" else empty end),
+            (if .backup.status == "fail" then
+              "- the last nightly backup FAILED (newest good one: \(.backup.last_ok // "never"))" else empty end),
+            (if .backup.status == "unknown" then
+              "- nightly backup status unknown: the app cannot read /var/lib/gantt-planner/backup-status" else empty end),
+            (if .backup.age_hours != null and .backup.age_hours > 30 then
+              "- the newest good backup is \(.backup.age_hours | round) h old (> 30 h)" else empty end)
+          ' "$body" >> "$problems_file"
+          if [ -s "$problems_file" ]; then
+            echo "thresholds breached:"
+            cat "$problems_file"
+          else
+            echo "all operational metrics within thresholds"
+          fi
+
+      - name: Decide and write the report
+        id: report
+        if: ${{ !cancelled() }}
+        env:
+          OPS_OUTCOME: ${{ steps.ops.outcome }}
+        run: |
+          set -euo pipefail
+          probe="$RUNNER_TEMP/probe-problems.md"
+          ops="$RUNNER_TEMP/ops-problems.md"
+          touch "$probe" "$ops"
+          if [ "$OPS_OUTCOME" != "success" ]; then
+            echo "- the ops check step itself failed ($OPS_OUTCOME) - see the run log" >> "$ops"
+          fi
+          report="$RUNNER_TEMP/uptime-report.md"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if [ -s "$probe" ] || [ -s "$ops" ]; then
+            alert=true
+            {
+              printf 'Production check failed at **%s** (%s).\n\n' "$now" "$RUN_URL"
+              if [ -s "$probe" ]; then
+                printf 'Uptime - last of %s attempts %ss apart:\n\n' "$ATTEMPTS" "$RETRY_DELAY"
+                cat "$probe"
+                echo
+              fi
+              if [ -s "$ops" ]; then
+                printf "Operational metrics (\`/api/ops/status\`):\n\n"
+                cat "$ops"
+                echo
+              fi
+              printf '%s\n' 'Runbook: docs/runbook.md, section 6 (monitoring and alerts).'
+            } > "$report"
+          else
+            alert=false
+            printf 'Production is healthy again as of %s (%s).\n' "$now" "$RUN_URL" > "$report"
+          fi
+          echo "alert=$alert" >> "$GITHUB_OUTPUT"
           echo "report=$report" >> "$GITHUB_OUTPUT"
 
       - name: Open or update the uptime issue
-        if: steps.probe.outputs.healthy == 'false'
+        if: ${{ !cancelled() && steps.report.outputs.alert == 'true' }}
         env:
-          REPORT: ${{ steps.probe.outputs.report }}
+          REPORT: ${{ steps.report.outputs.report }}
         run: |
           set -euo pipefail
           gh label create uptime --color B60205 \
-            --description "Production uptime check is failing (opened by the Uptime workflow)" --force
+            --description "Production uptime/metrics check is failing (opened by the Uptime workflow)" --force
           issue="$(gh issue list --label uptime --state open --limit 1 --json number --jq '.[0].number // empty')"
           if [ -n "$issue" ]; then
             gh issue comment "$issue" --body-file "$REPORT"
@@ -110,9 +217,9 @@ jobs:
           fi
 
       - name: Close the uptime issue on recovery
-        if: steps.probe.outputs.healthy == 'true'
+        if: ${{ !cancelled() && steps.report.outputs.alert == 'false' }}
         env:
-          REPORT: ${{ steps.probe.outputs.report }}
+          REPORT: ${{ steps.report.outputs.report }}
         run: |
           set -euo pipefail
           # No label yet means no uptime issue was ever opened: nothing to close.
@@ -123,7 +230,7 @@ jobs:
           done
 
       - name: Fail the run while production is unhealthy
-        if: steps.probe.outputs.healthy == 'false'
+        if: ${{ !cancelled() && steps.report.outputs.alert == 'true' }}
         run: |
-          echo "::error::uptime check failed - see the open 'uptime' issue"
+          echo "::error::production check failed - see the open 'uptime' issue"
           exit 1

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ensureSession } from "@/api/client";
 import { cachedPlanVersion, PLAN_KEY } from "./usePlan";
+import { CONFIRMATION_KEY } from "./useConfirmation";
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 60_000;
@@ -99,9 +100,17 @@ export function useSessionEvents(onPlanChanged: (ids: number[]) => void): { agen
       onPlanChangedRef.current(parsePlanChanged(data));
     };
 
+    // A mass deletion requested by an external MCP client waits for approval in the app; the
+    // banner re-reads GET /api/plan/confirmation whenever one appears or gets resolved.
+    const handleConfirmation = () => {
+      void queryClient.invalidateQueries({ queryKey: CONFIRMATION_KEY });
+    };
+
     const detach = (es: EventSource) => {
       es.removeEventListener("agent_status", handleAgentStatus);
       es.removeEventListener("plan_changed", handlePlanChanged);
+      es.removeEventListener("confirmation_pending", handleConfirmation);
+      es.removeEventListener("confirmation_resolved", handleConfirmation);
     };
 
     let attempt = 0;
@@ -127,6 +136,8 @@ export function useSessionEvents(onPlanChanged: (ids: number[]) => void): { agen
       source = es;
       es.addEventListener("agent_status", handleAgentStatus);
       es.addEventListener("plan_changed", handlePlanChanged);
+      es.addEventListener("confirmation_pending", handleConfirmation);
+      es.addEventListener("confirmation_resolved", handleConfirmation);
       es.onopen = () => {
         attempt = 0;
       };
