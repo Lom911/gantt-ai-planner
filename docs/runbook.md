@@ -33,8 +33,10 @@
   - `gantt-planner_egress` — отдельная сеть проекта, только у `app`:
     исходящий HTTPS к API LLM (OpenRouter/Anthropic).
 - Образ приложения: `ghcr.io/alomaev-hue/gantt-ai-planner`, теги
-  `sha-<короткий-sha>` и `latest`; CD деплоит по неизменяемому digest
-  (`sha-<short>@sha256:<digest>`), а не по тегу.
+  `sha-<короткий-sha>` и `latest`. Теги в GHCR изменяемые, поэтому сервер
+  принимает **только** ссылку с неизменяемым digest
+  (`sha-<short>@sha256:<digest>`) — и от CD, и при ручном деплое/откате;
+  как узнать digest — раздел 2, «Где взять digest».
 
 ## 1. Первичная настройка сервера
 
@@ -119,15 +121,16 @@
      сервере не нужен, поддомен создаёт владелец);
    - убедиться, что порты 80/443 доступны из интернета (это единственная
      проверка сетевого доступа, которая нужна при первом деплое).
-4. Первый деплой — вручную, без CD, с явным тегом (`planner-deploy` без
-   текущего `IMAGE_TAG` в `.env` отказывается работать — ему не на что
-   откатываться):
+4. Первый деплой — вручную, без CD, с явной ссылкой **с digest**
+   (`planner-deploy` без текущего `IMAGE_TAG` в `.env` отказывается
+   работать — ему не на что откатываться; значение без digest он тоже не
+   примет как цель отката):
    ```bash
    cd /opt/gantt-planner
+   # digest образа sha-<commit> (см. раздел 2, «Где взять digest»):
+   docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<commit> --format '{{.Manifest.Digest}}'
    # Дописать (>>, а не >: в .env уже лежат LLM_PROVIDER/LLM_MODEL).
-   # Тег — публичный sha-<commit> из ghcr.io; можно сразу с digest:
-   # sha-<commit>@sha256:<digest> (digest — в логе шага push workflow Deploy).
-   echo "IMAGE_TAG=sha-<commit>" >> .env
+   echo "IMAGE_TAG=sha-<commit>@sha256:<digest>" >> .env
    docker compose -f compose.prod.yml pull
    docker compose -f compose.prod.yml up -d
    docker compose -f compose.prod.yml logs -f migrate app
@@ -180,41 +183,67 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes -i <deploy-key> deploy@<host> sha-<sh
 ```
 
 Forced command `planner-deploy-wrapper` проверяет, что пришёл ровно один
-токен формата `^sha-[0-9a-f]{7,40}(@sha256:[0-9a-f]{64})?$` (без digest —
-для ручных деплоев и откатов), и вызывает
-`sudo /usr/local/bin/planner-deploy <tag>`. Значение целиком попадает в
-`IMAGE_TAG` в `.env`, Compose тянет `…:sha-<short>@sha256:<digest>` —
-ровно тот манифест, что просканирован, даже если тег потом перепишут.
-Дальше `planner-deploy`:
+токен формата `^sha-[0-9a-f]{7,40}@sha256:[0-9a-f]{64}$` — **только с
+digest**, голый тег `sha-<short>` отклоняется (в том числе для ручных
+деплоев и откатов: тег изменяемый), — и вызывает
+`sudo /usr/local/bin/planner-deploy <ref>`. `planner-deploy` проверяет то
+же выражение ещё раз. Значение целиком попадает в `IMAGE_TAG` в `.env`,
+Compose тянет `…:sha-<short>@sha256:<digest>` — ровно тот манифест, что
+просканирован, даже если тег потом перепишут. Дальше `planner-deploy`:
 
-1. читает текущий `IMAGE_TAG` из `.env` — это цель отката — и проверяет
+1. берёт блокировку `/run/lock/planner-deploy.lock` (`flock -w 30`):
+   одновременно идёт только один деплой (CD-запуски и так сериализованы
+   `concurrency` в workflow, но ручной деплой/откат мог бы пересечься с
+   ними). Если за 30 секунд блокировку взять не удалось — выход с кодом 1
+   и сообщением `another deploy is running`, **ничего не тронуто** (даже
+   `.env` не прочитан). Файл блокировки — только обычный файл root'а:
+   симлинк или чужой файл в `/run/lock` скрипт не откроет;
+2. читает текущий `IMAGE_TAG` из `.env` — это цель отката — и проверяет
    его тем же регулярным выражением; если строки нет или значение не
-   похоже на тег (`latest`, ручная правка, мусор), выходит с кодом 1, не
-   вызывая docker вообще;
-2. `IMAGE_TAG=<новый> docker compose pull app migrate` — тег передаётся
-   только через окружение; если образа нет или сеть упала, скрипт
-   выходит с кодом 1, **не трогая** `.env` и работающий стек;
-3. снимает снапшот базы: `pg_dump -U planner_owner -Fc planner` в
-   `/var/backups/gantt-planner/pre-deploy-<UTC-время>.dump` (0600, пишется
-   в `.tmp` и переименовывается; снапшоты старше 7 дней удаляются). Если
-   дамп не удался или пустой — выход с кодом 1, **ничего не изменено**:
-   без снапшота деплоя нет;
-4. пишет новый тег в `.env` и делает `docker compose up -d` (это
-   прогоняет `migrate` — `alembic upgrade head` от `planner_owner` — и
-   перезапускает `app` на новом образе);
-5. до 60 секунд опрашивает `/healthz` изнутри контейнера `app`
-   (`docker compose exec app python -c ...`);
-6. если здоров — выходит с кодом 0;
-7. при **любой** ошибке после записи `.env` (упал `up -d`, например
-   `migrate` вышел с ошибкой; не прошёл healthcheck; скрипт прерван) —
-   ловушка `EXIT` (единственный путь отката) возвращает в `.env`
-   предыдущий тег и перезапускает **только приложение**:
-   `docker compose up -d --no-deps app` — без `migrate`. Затем ещё раз
-   проверяет `/healthz`, печатает, здоров ли откат, и имя снапшота из
-   п. 3, и выходит с кодом 1 (CI увидит деплой как упавший). Так `.env`
-   никогда не остаётся с тегом, который не задеплоился.
+   ссылка с digest (`latest`, голый тег, ручная правка, мусор), выходит с
+   кодом 1, не вызывая docker вообще;
+3. `IMAGE_TAG=<новый> timeout 300 docker compose pull app migrate` — ссылка
+   передаётся только через окружение; если образа нет, сеть упала или
+   pull не уложился в 300 секунд, скрипт выходит с кодом 1, **не трогая**
+   `.env` и работающий стек;
+4. снимает снапшот базы: `timeout 300 … pg_dump --lock-wait-timeout=60s
+   -U planner_owner -Fc planner` в
+   `/var/backups/gantt-planner/pre-deploy-<UTC-время>.dump` (0600; пишется
+   во временный файл с уникальным именем `mktemp`
+   `.pre-deploy.tmp.XXXXXXXX` и переименовывается; при совпадении секунды
+   с прошлым снапшотом к имени добавляется суффикс; снапшоты старше 7 дней
+   удаляются). `--lock-wait-timeout`: `pg_dump` сдаётся, а не ждёт
+   бесконечно за чужой эксклюзивной блокировкой. Если дамп не удался,
+   пустой или не уложился в 300 секунд — выход с кодом 1, **ничего не
+   изменено**: без снапшота деплоя нет;
+5. пишет новую ссылку в `.env` и делает `timeout 300 docker compose up -d`
+   (это прогоняет `migrate` — `alembic upgrade head` от `planner_owner` —
+   и перезапускает `app` на новом образе);
+6. до 60 секунд опрашивает `/healthz` изнутри контейнера `app`
+   (`docker compose exec app python -c ...`, каждая проба — под
+   `timeout 20`);
+7. если здоров — выходит с кодом 0;
+8. при **любой** ошибке после записи `.env` (упал или не уложился в срок
+   `up -d`, например `migrate` вышел с ошибкой; не прошёл healthcheck;
+   скрипт прерван) — ловушка `EXIT` (единственный путь отката) возвращает
+   в `.env` предыдущую ссылку и перезапускает **только приложение**:
+   `timeout 300 docker compose up -d --no-deps app` — без `migrate`. Затем
+   ещё раз проверяет `/healthz`, печатает, здоров ли откат, и имя
+   снапшота из п. 4, и выходит с кодом 1 (CI увидит деплой как упавший).
+   Так `.env` никогда не остаётся со ссылкой, которая не задеплоилась.
+   Блокировка отпускается только после отката (когда процесс завершился).
    Поведение покрыто `bash deploy/tests/test_planner_deploy.sh`
-   (docker заглушён).
+   (docker, timeout и — где его нет, например в Git Bash — flock
+   заглушены; удержанная блокировка проверяется настоящим `flock` там, где
+   он есть).
+
+Все сроки — `timeout -k 10 <сек>`: после SIGTERM через 10 секунд
+следует SIGKILL. Худший случай для одного деплоя — около 30 + 300 + 300 +
+300 + 60 секунд плюс откат; `ssh` из CD столько и подождёт. `timeout`
+запускает команду в отдельной группе процессов (так по сроку
+гарантированно убиваются и `docker`, и его плагин `compose`), поэтому при
+ручном запуске в терминале Ctrl+C во время pull/dump/`up -d` может
+сработать только после окончания шага или его срока.
 
 Почему откат не запускает миграции: если новый релиз успел применить
 миграцию, `alembic upgrade head` в образе предыдущей версии не знает
@@ -247,39 +276,54 @@ Forced command `planner-deploy-wrapper` проверяет, что пришёл 
 Если релиз с деструктивной миграцией всё же ушёл и данные повреждены —
 восстановить снапшот, снятый перед ним (ниже).
 
-### Ручной деплой конкретного тега (без CI)
+### Где взять digest
+
+Сервер принимает только `sha-<short>@sha256:<digest>`. Digest нужного
+релиза:
+
+- в workflow `Deploy` — в сводке запуска (Summary → «Image») и в логе шага
+  «Push scanned image to GHCR» (`pushed ghcr.io/…:sha-<short>@sha256:…`);
+- из реестра по тегу (с любой машины с Docker; пакет публичный):
+  ```bash
+  docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<short> --format '{{.Manifest.Digest}}'
+  # или весь дескриптор манифеста: --format '{{json .Manifest}}'  (поле "digest")
+  ```
+  Это digest того, на что тег указывает **сейчас**; для релизов из CD он
+  совпадает с тем, что напечатал `Deploy`, пока тег никто не переписал —
+  при сомнениях брать значение из `Deploy`;
+- для образа, который уже есть на сервере (например, предыдущий релиз):
+  `docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/alomaev-hue/gantt-ai-planner:sha-<short>`
+  (печатает `ghcr.io/…@sha256:<digest>`);
+- ссылка предыдущего релиза целиком — в логе `planner-deploy`: перед
+  каждым деплоем он печатает `previous: 'sha-…@sha256:…'` (вывод шага
+  «Deploy over SSH» в Actions).
+
+### Ручной деплой конкретного релиза (без CI)
 
 Отдельного `scripts/deploy-manual.sh`, который упоминает спецификация
 (§14), нет: его роль выполняют команды этого раздела и первого деплоя
-(§1, п. 4) — `planner-deploy` уже делает pull, снапшот, запуск,
-healthcheck и откат.
+(§1, п. 4) — `planner-deploy` уже делает блокировку, pull, снапшот,
+запуск, healthcheck и откат.
 
 ```bash
-ssh -i <deploy-key> deploy@<host> sha-<short>                    # по тегу
-ssh -i <deploy-key> deploy@<host> sha-<short>@sha256:<digest>    # по digest (надёжнее)
+ssh -i <deploy-key> deploy@<host> sha-<short>@sha256:<digest>
 ```
 
 Или прямо на сервере от root (в обход wrapper'а, например для
-диагностики):
+диагностики; проверки те же):
 
 ```bash
-sudo /usr/local/bin/planner-deploy sha-<short>
+sudo /usr/local/bin/planner-deploy sha-<short>@sha256:<digest>
 ```
 
 ### Откат
 
 Откат на релиз **без миграций между ним и текущим** — это обычный деплой
-предыдущего тега:
+предыдущего релиза по его ссылке с digest (см. «Где взять digest»):
 
 ```bash
-ssh -i <deploy-key> deploy@<host> sha-<предыдущий-short>
+ssh -i <deploy-key> deploy@<host> sha-<предыдущий-short>@sha256:<digest>
 ```
-
-Тег предыдущего успешного деплоя можно взять:
-- из истории запусков workflow `Deploy` в GitHub Actions (шаг push
-  печатает и digest);
-- из лога `planner-deploy`: перед каждым деплоем он печатает
-  `previous: '<tag>'` (виден в выводе шага «Deploy over SSH» в Actions).
 
 `planner-deploy` откатывается автоматически при неуспешном healthcheck;
 ручной откат нужен, если проблема обнаружилась позже (например, в логах
@@ -288,15 +332,19 @@ ssh -i <deploy-key> deploy@<host> sha-<предыдущий-short>
 Если после целевого тега были миграции, обычный деплой старого тега не
 пройдёт: его `migrate` упадёт на неизвестной ревизии, и `planner-deploy`
 сам вернётся на текущий тег. Тогда откатывать только код, без
-`migrate`, вручную от root (схема обратно совместима по правилу выше):
+`migrate`, вручную от root (схема обратно совместима по правилу выше;
+блокировка — та же, что у `planner-deploy`, чтобы не пересечься с CD):
 
 ```bash
 cd /opt/gantt-planner
-old='sha-<предыдущий-short>'            # или sha-<short>@sha256:<digest>
-IMAGE_TAG="$old" docker compose -f compose.prod.yml pull app
+old='sha-<предыдущий-short>@sha256:<digest>'    # только с digest: иначе следующий деплой откажется
+[[ "$old" =~ ^sha-[0-9a-f]{7,40}@sha256:[0-9a-f]{64}$ ]] || echo "не ссылка с digest!"
+exec 9>/run/lock/planner-deploy.lock; flock -w 30 9 || echo "идёт деплой — дальше не продолжать, повторить позже"
+IMAGE_TAG="$old" timeout 300 docker compose -f compose.prod.yml pull app
 sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=$old|" .env
-docker compose -f compose.prod.yml up -d --no-deps app
+timeout 300 docker compose -f compose.prod.yml up -d --no-deps app
 docker compose -f compose.prod.yml ps app   # дождаться (healthy)
+exec 9>&-                                      # отпустить блокировку
 ```
 
 Пока в `.env` стоит тег старше схемы, любые перезапуски `app` делать с
@@ -334,9 +382,9 @@ docker compose -f compose.prod.yml exec -T db psql -U postgres -v ON_ERROR_STOP=
 #    восстанавливаются из дампа)
 docker compose -f compose.prod.yml exec -T db pg_restore -U postgres -d planner --exit-on-error < "$snap"
 
-# 5. вернуть тег, который работал с этой схемой (тот, что был до
-#    неудачного деплоя), и поднять только приложение
-sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=sha-<тег-до-деплоя>|' .env
+# 5. вернуть ссылку, которая работала с этой схемой (та, что была до
+#    неудачного деплоя: `previous: '…'` в его логе), и поднять только приложение
+sed -i 's|^IMAGE_TAG=.*|IMAGE_TAG=sha-<тег-до-деплоя>@sha256:<digest>|' .env
 docker compose -f compose.prod.yml up -d --no-deps app
 curl -fsS https://gantt-ai-planner.duckdns.org/healthz
 ```

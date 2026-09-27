@@ -3,9 +3,9 @@
 #   docker compose -f compose.prod.yml up -d
 # from /opt/gantt-planner (so relative secrets:/ .env resolve correctly).
 #
-# IMAGE_TAG (in .env) names the app image: `sha-<hex>`, or `sha-<hex>@sha256:<digest>`
-# as written by planner-deploy for CD releases. There is deliberately no default
-# (no silent `latest`): without it every compose command fails fast.
+# IMAGE_TAG (in .env) names the app image as a digest-pinned `sha-<hex>@sha256:<digest>`
+# (written by planner-deploy, which refuses bare tags: GHCR tags are mutable). There is
+# deliberately no default (no silent `latest`): without it every compose command fails fast.
 #
 # Networks:
 #   - planner-proxy: external AND internal (no route out of it), created once by

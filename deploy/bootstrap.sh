@@ -97,10 +97,10 @@ step_compose_files() {
 
     if [ ! -f "$APP_DIR/.env" ]; then
         # No IMAGE_TAG on purpose (no silent `latest`): compose.prod.yml refuses to run
-        # without one, and the first release sets an explicit sha tag by hand
+        # without one, and the first release sets an explicit digest-pinned ref by hand
         # (docs/runbook.md section 1); planner-deploy maintains it from then on.
         (umask 177 && printf '%s\n' \
-            '# IMAGE_TAG=sha-<commit>  <- added by the first manual deploy (docs/runbook.md section 1)' \
+            '# IMAGE_TAG=sha-<commit>@sha256:<digest>  <- added by the first manual deploy (docs/runbook.md section 1)' \
             'LLM_PROVIDER=openrouter' \
             'LLM_MODEL=anthropic/claude-sonnet-5' > "$APP_DIR/.env")
         chmod 0600 "$APP_DIR/.env"
@@ -231,8 +231,9 @@ main() {
     echo "         $APP_DIR/.env) or $SECRETS_DIR/anthropic_api_key if using a real Anthropic key instead"
     echo "      2. add the CI deploy key to /home/$DEPLOY_USER/.ssh/authorized_keys (see step above)"
     echo "      3. point the gantt-ai-planner.duckdns.org A record at this host's IP"
-    echo "      4. run the first deploy manually with an explicit tag (docs/runbook.md section 1):"
-    echo "         echo 'IMAGE_TAG=sha-<commit>' >> $APP_DIR/.env"
+    echo "      4. run the first deploy manually with a digest-pinned ref (docs/runbook.md section 1);"
+    echo "         the digest: docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<commit> --format '{{json .Manifest}}'"
+    echo "         echo 'IMAGE_TAG=sha-<commit>@sha256:<digest>' >> $APP_DIR/.env"
     echo "         cd $APP_DIR && docker compose -f compose.prod.yml pull && docker compose -f compose.prod.yml up -d"
 }
 

@@ -98,6 +98,16 @@ jobs:
           docker buildx imagetools inspect "$IMAGE@$digest" >/dev/null
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "ref=$TAG@$digest" >> "$GITHUB_OUTPUT"
+          # The server only accepts digest-pinned refs: keep this one findable for manual
+          # deploys and rollbacks (docs/runbook.md section 2).
+          echo "pushed $IMAGE:$TAG@$digest"
+          {
+            echo "### Image"
+            echo
+            echo "\`$IMAGE:$TAG@$digest\`"
+            echo
+            echo "Deploy / roll back to exactly this image: \`ssh deploy@<host> $TAG@$digest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy over SSH
         env:
