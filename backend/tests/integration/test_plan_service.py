@@ -304,3 +304,13 @@ async def test_stale_expected_version_is_rejected(service):
     assert out.state.version == 3
     assert (await service.undo(sid, expected_version=3)).version == 2
     assert (await service.redo(sid)).version == 3
+    # An import (replace) is checked the same way, under the plan lock.
+    with pytest.raises(VersionConflict):
+        await service.replace(
+            sid, build_demo_plan(TODAY), source="import", summary="Импорт", expected_version=2
+        )
+    assert (await service.get_state(sid)).version == 3
+    replaced = await service.replace(
+        sid, build_demo_plan(TODAY), source="import", summary="Импорт", expected_version=3
+    )
+    assert replaced.version == 4

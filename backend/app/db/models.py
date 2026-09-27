@@ -4,6 +4,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -59,6 +61,9 @@ class ChatUsageRow(Base):
     __table_args__ = (Index("ix_chat_usage_created", "created_at"),)
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = _created()
+    # Billed LLM tokens of the turn this message started, written when the turn ends (for the
+    # ops status endpoint's tokens_today).
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
 
 class ChatMessageRow(Base):
@@ -80,7 +85,17 @@ class ChatMessageRow(Base):
 
 class McpTokenRow(Base):
     __tablename__ = "mcp_tokens"
-    __table_args__ = (Index("ix_mcp_tokens_session_id", "session_id"),)
+    __table_args__ = (
+        Index("ix_mcp_tokens_session_id", "session_id"),
+        # One live (non-revoked) token per session: issuing one revokes the rest, and the
+        # database refuses a second one even if two issues ever raced past the advisory lock.
+        Index(
+            "uq_mcp_tokens_live_session",
+            "session_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
@@ -91,3 +106,50 @@ class McpTokenRow(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = _created()
+
+
+class PlanConfirmationRow(Base):
+    """A mass deletion waiting for the user's confirmation (see PlanService.apply): the exact
+    batch is pinned by `digest`, so a confirmation never carries over to a different batch.
+    At most one unresolved row per session; a new one supersedes it."""
+
+    __tablename__ = "plan_confirmations"
+    __table_args__ = (
+        Index("ix_plan_confirmations_session_id", "session_id"),
+        Index(
+            "uq_plan_confirmations_pending",
+            "session_id",
+            unique=True,
+            postgresql_where=text("resolved IS NULL"),
+        ),
+        CheckConstraint("origin IN ('agent', 'mcp')", name="ck_plan_confirmations_origin"),
+        CheckConstraint(
+            "resolved IN ('consumed', 'rejected', 'expired', 'superseded')",
+            name="ck_plan_confirmations_resolved",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)  # agent | mcp
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    task_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = _created()
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # consumed | rejected | expired | superseded; NULL while pending.
+    resolved: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class RateCounterRow(Base):
+    """Fixed-window per-client counters for the costly actions (new sessions, chat messages,
+    Excel imports): unlike the in-memory limiters they survive a restart or redeploy. Rows of
+    past windows are pruned by the hourly cleanup."""
+
+    __tablename__ = "rate_counters"
+    __table_args__ = (Index("ix_rate_counters_window_start", "window_start"),)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)

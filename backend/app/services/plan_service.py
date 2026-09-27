@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
@@ -21,6 +21,15 @@ from app.domain.operations import (
 )
 from app.domain.scheduler import ScheduledPlan, schedule
 from app.domain.seed import build_demo_plan
+from app.services.confirmations import (
+    CONFIRMATION_TTL,
+    Origin,
+    PendingConfirmation,
+    batch_digest,
+    deletion_summary,
+    iso_utc,
+    resolved_event,
+)
 from app.services.errors import (
     AgentBusy,
     NoSession,
@@ -48,6 +57,9 @@ MCP_WAIT_SECONDS = 10.0
 # never cross this boundary: comparing across it would diff tasks that merely share an id
 # (e.g. "UI-кит и дизайн-система" pre-boundary vs. "Заказ грузового транспорта" post-boundary).
 _BOUNDARY_SOURCES = frozenset({"import", "reset", "seed"})
+# Sources whose mass deletions can be confirmed (see PlanService._gate_confirmation).
+_CONFIRMATION_ORIGINS: dict[str, Origin] = {"agent": "agent", "mcp": "mcp"}
+
 _BOUNDARY_SUMMARIES: dict[str, str] = {
     "import": "Задача появилась при импорте плана",
     "reset": "Задача появилась при сбросе к демо-плану",
@@ -205,6 +217,11 @@ class PlanService:
         return version_no, plan, scheduled
 
     def _cache_put(self, version_id: int, plan: Plan, scheduled: ScheduledPlan) -> None:
+        if version_id in self._plan_cache:
+            # Concurrent cold reads of one version all miss, then all store it: keep the first
+            # entry, or its bytes would be counted once per reader for a single entry.
+            self._plan_cache.move_to_end(version_id)
+            return
         size = plan_json_size(plan)
         if size > PLAN_CACHE_MAX_BYTES // 4:
             return  # one huge plan would evict everything else
@@ -318,44 +335,204 @@ class PlanService:
         confirmed: bool = False,
         expected_version: int | None = None,
     ) -> ApplyOutcome:
+        """Apply a batch atomically. A batch that deletes many tasks needs a confirmation:
+        `confirmed` asks to use one (see _gate_confirmation for what makes it count)."""
         check_batch_size(ops)  # before confirmation: an oversized batch fails however confirmed
         await self._guard_busy(session_id, source)
+        events: list[dict[str, Any]] = []
+        refusal: tuple[PendingConfirmation, bool] | None = None
+        applied: tuple[ApplyOutcome, bool] | None = None
         async with self.locks.lock(session_id), self.sessionmaker() as db, db.begin():
             await repo.lock_session_plan(db, session_id)
             version, plan = await self._load(db, session_id)
             self._check_version(expected_version, version)
-            if not confirmed and requires_confirmation(plan, ops):
-                raise ConfirmationRequired(
-                    "Пакет удаляет много задач. Спросите пользователя и повторите с confirmed=true"
+            if requires_confirmation(plan, ops):
+                refusal = await self._gate_confirmation(
+                    db, session_id, version, plan, ops, source, confirmed, events
                 )
-            # CPU-bound (up to MAX_BATCH_OPS ops on a 500-task plan): run it off the event loop
-            # so SSE heartbeats, /healthz and other sessions stay responsive meanwhile.
-            before = await asyncio.to_thread(schedule, plan)
-            result = await asyncio.to_thread(apply_operations, plan, ops, before)
-            summary = apply_summary(result.changes, plan.project_start, result.plan.project_start)
-            changed = bool(result.changes) or result.plan.project_start != plan.project_start
-            if changed:
-                await self._commit(
-                    db,
-                    session_id,
-                    version,
-                    result.plan,
-                    source,
-                    turn_id,
-                    summary,
-                    [c.model_dump() for c in result.changes],
+            if refusal is None:
+                applied = await self._apply_locked(
+                    db, session_id, version, plan, ops, source, turn_id
                 )
-                state = await self._build_state(
-                    db, session_id, version + 1, result.plan, result.scheduled
-                )
-            else:
-                state = await self._build_state(db, session_id, version, plan, before)
+        # Committed, a refused batch included: its pending confirmation is what the user is
+        # asked to approve, so it must be stored, not rolled back with the refusal.
+        for event in events:
+            self.bus.publish(session_id, event)
+        if refusal is not None:
+            raise _confirmation_required(*refusal, confirmed=confirmed)
+        assert applied is not None
+        outcome, changed = applied
         if changed:
-            changed_ids = sorted({c.task_id for c in result.changes})
-            self._publish(session_id, state.version, source, turn_id, changed_ids)
-        return ApplyOutcome(
+            changed_ids = sorted({c.task_id for c in outcome.changes})
+            self._publish(session_id, outcome.state.version, source, turn_id, changed_ids)
+        return outcome
+
+    async def _apply_locked(
+        self,
+        db: AsyncSession,
+        session_id: uuid.UUID,
+        version: int,
+        plan: Plan,
+        ops: Sequence[Operation],
+        source: Source,
+        turn_id: uuid.UUID | None,
+    ) -> tuple[ApplyOutcome, bool]:
+        """The edit itself, inside apply's locked transaction: the outcome, and whether a new
+        version was stored."""
+        # CPU-bound (up to MAX_BATCH_OPS ops on a 500-task plan): run it off the event loop
+        # so SSE heartbeats, /healthz and other sessions stay responsive meanwhile.
+        before = await asyncio.to_thread(schedule, plan)
+        result = await asyncio.to_thread(apply_operations, plan, ops, before)
+        summary = apply_summary(result.changes, plan.project_start, result.plan.project_start)
+        changed = bool(result.changes) or result.plan.project_start != plan.project_start
+        if changed:
+            await self._commit(
+                db,
+                session_id,
+                version,
+                result.plan,
+                source,
+                turn_id,
+                summary,
+                [c.model_dump() for c in result.changes],
+            )
+            state = await self._build_state(
+                db, session_id, version + 1, result.plan, result.scheduled
+            )
+        else:
+            state = await self._build_state(db, session_id, version, plan, before)
+        outcome = ApplyOutcome(
             state, result.changes, result.warnings, result.created_task_ids, summary
         )
+        return outcome, changed
+
+    async def _gate_confirmation(
+        self,
+        db: AsyncSession,
+        session_id: uuid.UUID,
+        version: int,
+        plan: Plan,
+        ops: Sequence[Operation],
+        source: Source,
+        confirmed: bool,
+        events: list[dict[str, Any]],
+    ) -> tuple[PendingConfirmation, bool] | None:
+        """May this mass deletion run? Only against the session's pending confirmation for
+        exactly this batch on this plan version (digest), from the same origin, unexpired and
+        authorized, which it then consumes in apply's transaction under the plan lock: used
+        once, and only together with the edit. Returns None if the batch may run; otherwise
+        the pending confirmation to refuse it with (stored for this batch and origin,
+        superseding any other) and whether it was already there.
+
+        Authorized means, for origin "agent": `confirmed` itself. The agent loop lets the
+        model's confirmed=true through only when the user's current message is an exact «да»
+        or «подтверждаю» (app.agent.confirmation) and the confirmation was asked before that
+        message. For origin "mcp": the user approved it in the browser (approve_confirmation);
+        the client's own flag proves nothing. Any other confirmed=true counts as absent."""
+        origin = _CONFIRMATION_ORIGINS.get(source)
+        if origin is None:
+            # The web UI edits one task at a time and has no confirmation step of its own.
+            raise ConfirmationRequired(
+                "Пакет удаляет много задач. Спросите пользователя и повторите с confirmed=true"
+            )
+        now = datetime.now(UTC)
+        digest = batch_digest(version, ops)
+        row = await repo.get_unresolved_confirmation(db, session_id)
+        if row is not None and row.expires_at <= now:
+            await self._resolve_confirmation(db, row.id, "expired", events)
+            row = None
+        if row is not None and row.digest == digest and row.origin == origin:
+            if confirmed and (origin == "agent" or row.approved_at is not None):
+                await self._resolve_confirmation(db, row.id, "consumed", events)
+                return None
+            # The same request again (a client retrying before the user approved): keep its
+            # id, expiry and approval instead of pulling the request the user is looking at.
+            return PendingConfirmation.from_row(row), True
+        if row is not None:
+            await self._resolve_confirmation(db, row.id, "superseded", events)
+        summary, count = deletion_summary(plan, ops)
+        new = await repo.add_confirmation(
+            db,
+            session_id=session_id,
+            digest=digest,
+            origin=origin,
+            summary=summary,
+            task_count=count,
+            expires_at=now + CONFIRMATION_TTL,
+        )
+        pending = PendingConfirmation.from_row(new)
+        if origin == "mcp":  # the browser shows it for approval; the chat asks for «да» itself
+            events.append(pending.pending_event())
+        return pending, False
+
+    @staticmethod
+    async def _resolve_confirmation(
+        db: AsyncSession, confirmation_id: uuid.UUID, result: str, events: list[dict[str, Any]]
+    ) -> None:
+        await repo.resolve_confirmation(db, confirmation_id, result)
+        events.append(resolved_event(confirmation_id, result))
+
+    async def get_confirmation(self, session_id: uuid.UUID) -> PendingConfirmation | None:
+        """The session's current pending confirmation, of either origin; expired is absent."""
+        async with self.sessionmaker() as db:
+            row = await repo.get_unresolved_confirmation(db, session_id)
+        if row is None or row.expires_at <= datetime.now(UTC):
+            return None
+        return PendingConfirmation.from_row(row)
+
+    async def approve_confirmation(
+        self, session_id: uuid.UUID, confirmation_id: uuid.UUID
+    ) -> PendingConfirmation:
+        """The user approved an MCP client's mass deletion in the browser: the client's next
+        confirmed=true of exactly that batch may run it. Only the session's current, unexpired
+        request, and only an MCP one (the chat's are confirmed by replying «да»)."""
+        return await self._settle_confirmation(session_id, confirmation_id, approve=True)
+
+    async def reject_confirmation(self, session_id: uuid.UUID, confirmation_id: uuid.UUID) -> None:
+        await self._settle_confirmation(session_id, confirmation_id, approve=False)
+
+    async def _settle_confirmation(
+        self, session_id: uuid.UUID, confirmation_id: uuid.UUID, *, approve: bool
+    ) -> PendingConfirmation:
+        events: list[dict[str, Any]] = []
+        error: DomainError | None = None
+        settled: PendingConfirmation | None = None
+        async with self.sessionmaker() as db, db.begin():
+            await repo.lock_session_plan(db, session_id)  # serialized with apply's consume
+            row = await repo.get_unresolved_confirmation(db, session_id)
+            now = datetime.now(UTC)
+            if row is not None and row.expires_at <= now:
+                await self._resolve_confirmation(db, row.id, "expired", events)
+                row = None
+            if row is None or row.id != confirmation_id:
+                error = NotFound("Запрос на подтверждение не найден или устарел")
+            elif approve and row.origin != "mcp":
+                error = NotFound("Это удаление подтверждается ответом «да» в чате")
+            elif approve:
+                if row.approved_at is None:
+                    await repo.approve_confirmation(db, row.id, now)
+                    events.append(resolved_event(row.id, "approved"))
+                settled = replace(PendingConfirmation.from_row(row), approved=True)
+            else:
+                await self._resolve_confirmation(db, row.id, "rejected", events)
+                settled = PendingConfirmation.from_row(row)
+        for event in events:  # committed, an expiry noticed on the way included
+            self.bus.publish(session_id, event)
+        if error is not None:
+            raise error
+        assert settled is not None
+        return settled
+
+    async def discard_confirmation(self, session_id: uuid.UUID, *, origin: Origin) -> None:
+        """End the session's pending confirmation of `origin`, if any, as rejected: a chat
+        reply other than «да» answers the assistant's question, so an old request can't be
+        picked up by a later «да» given to something else."""
+        async with self.sessionmaker() as db, db.begin():
+            ids = await repo.resolve_unresolved_confirmations(
+                db, session_id, origin=origin, resolved="rejected"
+            )
+        for confirmation_id in ids:
+            self.bus.publish(session_id, resolved_event(confirmation_id, "rejected"))
 
     async def replace(
         self,
@@ -365,11 +542,13 @@ class PlanService:
         source: Source,
         summary: str,
         chat_note: str | None = None,
+        expected_version: int | None = None,
     ) -> PlanState:
         await self._guard_busy(session_id, source)
         async with self.locks.lock(session_id), self.sessionmaker() as db, db.begin():
             await repo.lock_session_plan(db, session_id)
             version, current = await self._load(db, session_id)
+            self._check_version(expected_version, version)
             before, after = await asyncio.to_thread(lambda: (schedule(current), schedule(plan)))
             changes = diff_plans(before, after)
             await self._commit(
@@ -491,3 +670,37 @@ class PlanService:
                 "changed_task_ids": changed,
             },
         )
+
+
+def _confirmation_required(
+    pending: PendingConfirmation, reused: bool, *, confirmed: bool
+) -> ConfirmationRequired:
+    """The refusal of a mass deletion, telling the caller how its origin confirms one (the
+    message reaches the model through the MCP tool error)."""
+    if pending.origin == "agent":
+        how = (
+            "Спросите пользователя, подтверждает ли он удаление, попросите ответить «да» и только "
+            "после этого ответа повторите тот же пакет с confirmed=true."
+        )
+    else:
+        how = (
+            "Попросите пользователя подтвердить удаление в веб-приложении планировщика (там "
+            "показан этот запрос), затем повторите тот же пакет с confirmed=true до "
+            f"{pending.expires_at:%H:%M} UTC. Без подтверждения в приложении confirmed=true "
+            "не действует."
+        )
+    note = ""
+    if confirmed and reused and pending.origin == "mcp" and not pending.approved:
+        note = "Удаление ещё не подтверждено в веб-приложении. "
+    elif confirmed:
+        note = "confirmed=true не принят: нет подтверждения именно этого пакета. "
+    return ConfirmationRequired(
+        f"{note}Пакет удаляет много задач — {pending.summary}. {how}",
+        details={
+            "confirmation_id": str(pending.id),
+            "origin": pending.origin,
+            "summary": pending.summary,
+            "count": pending.count,
+            "expires_at": iso_utc(pending.expires_at),
+        },
+    )

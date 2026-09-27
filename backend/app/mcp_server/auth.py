@@ -14,6 +14,7 @@ from fastmcp.server.auth import AccessToken, TokenVerifier
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import repo
+from app.services.plan_service import TOUCH_INTERVAL
 from app.services.sessions import hash_token
 
 TOKEN_PREFIX = "mcp_"
@@ -30,15 +31,23 @@ class SessionTokenVerifier(TokenVerifier):
         if not token.startswith(TOKEN_PREFIX):
             return None
         now = datetime.now(UTC)
+        stale = now - TOUCH_INTERVAL
         async with self._sessionmaker() as db, db.begin():
-            row = await repo.get_active_mcp_token(db, hash_token(token), now)
-            if row is None:
+            found = await repo.get_active_mcp_token(db, hash_token(token), now)
+            if found is None:
                 return None
-            await repo.touch_mcp_token(db, row.id, now)
+            row, last_seen = found
             session_id = row.session_id
+            # Every MCP request comes through here, but both timestamps only matter at the scale
+            # of days (the «последнее использование» hint, the idle-session cleanup): like
+            # PlanService.resolve_session, write them at most every TOUCH_INTERVAL instead of an
+            # UPDATE (and a WAL write) per request.
+            if row.last_used_at is None or row.last_used_at < stale:
+                await repo.touch_mcp_token(db, row.id, now)
             # Working only through an MCP client is activity too: without this the idle-session
             # cleanup (session_ttl_days) would delete the plan of an MCP-only user.
-            await repo.touch_session(db, session_id)
+            if last_seen < stale:
+                await repo.touch_session(db, session_id)
         return AccessToken(
             token=token,
             client_id=str(session_id),

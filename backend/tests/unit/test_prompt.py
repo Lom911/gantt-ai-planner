@@ -15,3 +15,9 @@ def test_replies_are_plain_text_with_russian_dates():
     # model echoed ISO dates (2026-11-20) instead of the app's DD.MM.YYYY.
     assert "без Markdown" in STATIC_SYSTEM_PROMPT
     assert "ДД.ММ.ГГГГ" in STATIC_SYSTEM_PROMPT
+
+
+def test_mass_delete_is_confirmed_by_an_exact_yes():
+    # app.agent.confirmation accepts only «да»/«подтверждаю»: the prompt must ask for exactly that.
+    assert "ответить «да»" in STATIC_SYSTEM_PROMPT
+    assert "confirmed=true" in STATIC_SYSTEM_PROMPT

@@ -89,3 +89,39 @@ def test_usage_adds_up() -> None:
 def test_sdk_client_is_real_by_default() -> None:
     # The stub above replaces a real client instance; guard against the attribute moving.
     assert isinstance(AnthropicLLM("sk-ant-test", "m", 1)._client, anthropic.AsyncAnthropic)
+
+
+async def test_anthropic_call_uses_the_per_call_output_cap() -> None:
+    captured: list[dict[str, Any]] = []
+    final = Message(
+        id="msg_1",
+        type="message",
+        role="assistant",
+        model="claude-sonnet-5",
+        content=[TextBlock(type="text", text="Готово")],
+        stop_reason="end_turn",
+        stop_sequence=None,
+        usage=Usage(input_tokens=1, output_tokens=1),
+    )
+    llm = AnthropicLLM("sk-ant-test", "claude-sonnet-5", 100)
+
+    def stream(**kwargs: Any) -> _Stream:
+        captured.append(kwargs)
+        return _Stream(final)
+
+    llm._client = SimpleNamespace(messages=SimpleNamespace(stream=stream))  # type: ignore[assignment]
+    [ev async for ev in llm.stream(system=[], tools=[], messages=[], max_tokens=40)]
+    [ev async for ev in llm.stream(system=[], tools=[], messages=[], max_tokens=4000)]
+    [ev async for ev in llm.stream(system=[], tools=[], messages=[])]
+    # Never above the configured llm_max_tokens; the configured value when no cap is given.
+    assert [c["max_tokens"] for c in captured] == [40, 100, 100]
+
+
+def test_input_estimate_is_a_third_of_the_request_characters() -> None:
+    from app.agent.loop import estimate_input_tokens
+
+    system = [{"type": "text", "text": "я" * 300}]
+    estimate = estimate_input_tokens(system, [], [{"role": "user", "content": "x" * 300}])
+    # 600 characters of text plus the JSON around them, a third of that, rounded up.
+    assert 200 < estimate < 240
+    assert estimate_input_tokens([], [], []) >= 1

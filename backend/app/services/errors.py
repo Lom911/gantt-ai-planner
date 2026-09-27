@@ -12,6 +12,10 @@ class RateLimited(DomainError):
     code = "rate_limited"
 
 
+class Unauthorized(DomainError):
+    code = "unauthorized"
+
+
 class NoSession(DomainError):
     code = "no_session"
 

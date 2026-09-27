@@ -11,7 +11,7 @@ from app.api.deps import (
     require_session,
     set_session_cookie,
 )
-from app.services.errors import RateLimited
+from app.services.ratelimit import enforce
 
 router = APIRouter(prefix="/api", tags=["session"])
 
@@ -25,9 +25,15 @@ async def create_session(
     service = get_service(request)
     if token is not None and await service.resolve_session(token) is not None:
         return {"ok": True}
-    limiter = request.app.state.session_ip_limiter
-    if not limiter.allow(client_ip(request), settings.session_limit_per_ip_hour):
-        raise RateLimited("Слишком много новых сессий с вашего адреса. Попробуйте через час.")
+    async with service.sessionmaker() as db, db.begin():
+        await enforce(
+            db,
+            "session",
+            client_ip(request),
+            "hour",
+            settings.session_limit_per_ip_hour,
+            "Слишком много новых сессий с вашего адреса. Попробуйте через час.",
+        )
     new_token, _session_id = await service.create_session()
     set_session_cookie(response, settings, new_token)
     return {"ok": True}

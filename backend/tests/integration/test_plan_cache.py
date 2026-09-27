@@ -1,10 +1,12 @@
 """Read-path performance (load test on the production VPS: ~20 req/s per core, most of it
 per-request DB round trips plus re-parsing and re-scheduling the current snapshot)."""
 
+import asyncio
 from datetime import timedelta
 
 from sqlalchemy import text
 
+from app.db import repo
 from app.domain.operations import UpdateTask
 
 
@@ -75,3 +77,29 @@ async def test_last_seen_is_not_rewritten_on_every_request(app):
     async with service.sessionmaker() as db:
         age = (await db.execute(text("SELECT now() - last_seen_at FROM sessions"))).scalar_one()
     assert age < timedelta(seconds=10)  # stale: touched
+
+
+async def test_concurrent_cold_reads_keep_the_byte_counter_exact(app, monkeypatch):
+    # Every cold reader misses the cache before any of them has stored the plan, then each one
+    # stores it: replacing the entry must not count its bytes again, or the counter drifts up
+    # and the cache evicts far below its real budget.
+    service = app.state.service
+    service._plan_cache.clear()
+    service._plan_cache_bytes = 0
+    _, sid = await _new_session(service)
+    real_snapshot = repo.get_version_snapshot
+
+    async def slow_snapshot(db, version_id):
+        await asyncio.sleep(0.05)  # all readers are past the cache lookup by now
+        return await real_snapshot(db, version_id)
+
+    monkeypatch.setattr(repo, "get_version_snapshot", slow_snapshot)
+    # Pooled connections ready, so no reader is held back by opening one.
+    dbs = [service.sessionmaker() for _ in range(8)]
+    await asyncio.gather(*(db.execute(text("SELECT 1")) for db in dbs))
+    for db in dbs:
+        await db.close()
+    states = await asyncio.gather(*(service.get_state(sid) for _ in range(8)))
+    assert len({s.version for s in states}) == 1
+    assert len(service._plan_cache) == 1
+    assert service._plan_cache_bytes == sum(e[2] for e in service._plan_cache.values())

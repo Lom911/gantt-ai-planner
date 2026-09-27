@@ -3,84 +3,35 @@
 The server refuses a mass deletion until `apply_operations` is repeated with
 `confirmed=true`, but the flag is set by the model — and text it reads (a task description,
 an imported file) could talk it into setting the flag on its own. The agent loop therefore
-lets the flag through only when the user's message of the current turn is itself a short
-affirmative reply: «да», «подтверждаю», «удаляй», «ок», «yes»... A request («удали задачи
-1–6»), a question («да?») or a negation («да нет, не надо») never counts.
+lets the flag through only when the user's message of the current turn is exactly «да» or
+«подтверждаю» — any case, surrounding whitespace, trailing «.»/«!» and emoji allowed —
+which is the reply the assistant asks for. Anything else («ок», «можно», «удали», «да, но…»,
+a question) is not a confirmation: loose affirmatives were too easy to produce by accident,
+or to read into a reply meant for a different question.
 """
 
-import re
+import unicodedata
 
-_AFFIRMATIVE = (
-    "да",
-    "ага",
-    "угу",
-    "ок",
-    "окей",
-    "ладно",
-    "хорошо",
-    "давай",
-    "давайте",
-    "конечно",
-    "верно",
-    "точно",
-    "согласен",
-    "согласна",
-    "согласны",
-    "подтверждаю",
-    "подтверждаем",
-    "подтверждено",
-    "удаляй",
-    "удаляйте",
-    "удали",
-    "удалите",
-    "удалить",
-    "можно",
-    "yes",
-    "yep",
-    "yeah",
-    "ok",
-    "okay",
-    "sure",
-    "confirm",
-    "confirmed",
-    "delete",
-)
-# Words that may accompany an affirmative without changing its meaning («да, удаляй их все»).
-_FILLER = (
-    "все",
-    "их",
-    "это",
-    "эти",
-    "пожалуйста",
-    "так",
-    "уверен",
-    "уверена",
-    "удаление",
-    "please",
-    "all",
-    "them",
-    "it",
-    "go",
-    "ahead",
-    "do",
-)
-_MAX_WORDS = 6
-
-_A = "|".join(_AFFIRMATIVE)
-_ANY = "|".join(_AFFIRMATIVE + _FILLER)
-# Whole message: only affirmatives and fillers, at least one affirmative.
-_CONFIRMATION = re.compile(rf"(?:(?:{_ANY}) )*(?:{_A})(?: (?:{_ANY}))*")
+_CONFIRMATIONS = frozenset({"да", "подтверждаю"})
+# Emoji building blocks that may trail a reply: zero-width joiner, variation selectors,
+# skin-tone modifiers (category Sk, but so are ^ and `, hence the explicit range).
+_EMOJI_JOINERS = frozenset({"‍", "︎", "️"})
+_SKIN_TONES = range(0x1F3FB, 0x1F400)
 
 
-def _normalize(text: str) -> str:
-    """Lower case, ё → е, words (letters and digits) separated by single spaces."""
-    return " ".join(re.findall(r"\w+", text.casefold().replace("ё", "е")))
+def _is_trailer(ch: str) -> bool:
+    return (
+        ch in ".!"
+        or ch.isspace()
+        or ch in _EMOJI_JOINERS
+        or ord(ch) in _SKIN_TONES
+        or unicodedata.category(ch) == "So"  # emoji and other pictographs
+    )
 
 
 def is_explicit_confirmation(text: str) -> bool:
-    if "?" in text:
-        return False
-    normalized = _normalize(text)
-    if len(normalized.split()) > _MAX_WORDS:
-        return False
-    return _CONFIRMATION.fullmatch(normalized) is not None
+    body = text.strip()
+    end = len(body)
+    while end > 0 and _is_trailer(body[end - 1]):
+        end -= 1
+    return body[:end].casefold() in _CONFIRMATIONS

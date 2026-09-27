@@ -11,7 +11,7 @@ from sse_starlette import EventSourceResponse
 
 from app.api.deps import check_origin, client_ip, get_service, require_session
 from app.db import repo
-from app.services.errors import AgentBusy, RateLimited
+from app.services.errors import AgentBusy
 from app.services.ratelimit import check_chat_limits
 
 router = APIRouter(prefix="/api/chat")
@@ -40,38 +40,22 @@ async def chat(
     settings = request.app.state.settings
     if service.locks.is_busy(session_id):
         raise AgentBusy()
-    ip = client_ip(request)
-    per_ip, per_ip_day = settings.chat_limit_per_ip_hour, settings.chat_limit_per_ip_day
-    day_limiter = request.app.state.chat_ip_day_limiter
-    # The day limit is checked first without recording, so a day-blocked address doesn't
-    # also burn its hourly slots; no await in between, so nothing can interleave.
-    if day_limiter.full(ip, per_ip_day):
-        raise RateLimited(
-            f"Лимит: {per_ip_day} сообщений в сутки с одного адреса. Попробуйте завтра."
-        )
-    if not request.app.state.chat_ip_limiter.allow(ip, per_ip):
-        raise RateLimited(f"Лимит: {per_ip} сообщений в час с одного адреса. Попробуйте позже.")
-    day_limiter.allow(ip, per_ip_day)
     user_text = body.message.strip()
     turn_id = uuid.uuid4()
     # Check-then-reserve, atomically: without the advisory lock, two concurrent
     # requests could both pass check_chat_limits() (each sees the count *before* the
     # other's insert) and together exceed chat_limit_per_day/-hour. Taking the message
-    # slot here (INSERT) means run_turn() below must not insert it again.
+    # slot here (INSERT) means run_turn() below must not insert it again. A refusal rolls
+    # the whole transaction back, per-address counters included.
     async with service.sessionmaker() as db, db.begin():
         await db.execute(
             text("SELECT pg_advisory_xact_lock(:key)"), {"key": CHAT_RATE_LIMIT_LOCK_KEY}
         )
-        await check_chat_limits(
-            db,
-            session_id,
-            per_hour=settings.chat_limit_per_hour,
-            per_day=settings.chat_limit_per_day,
-        )
+        await check_chat_limits(db, session_id, client_ip(request), settings)
         await repo.add_chat_message(
             db, session_id=session_id, role="user", content=user_text, turn_id=turn_id
         )
-        await repo.add_chat_usage(db)
+        usage_id = await repo.add_chat_usage(db)
     agent = request.app.state.agent
 
     async def gen() -> AsyncIterator[dict[str, str]]:
@@ -80,7 +64,8 @@ async def chat(
         # a bare `async for ... in agent.run_turn(...): yield` would leave that inner
         # generator to be closed only whenever it happens to be garbage-collected.
         try:
-            async with aclosing(agent.run_turn(session_id, user_text, turn_id=turn_id)) as turn:
+            turn_events = agent.run_turn(session_id, user_text, turn_id=turn_id, usage_id=usage_id)
+            async with aclosing(turn_events) as turn:
                 async for event in turn:
                     yield _sse(event)
         except AgentBusy as exc:

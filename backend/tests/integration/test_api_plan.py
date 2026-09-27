@@ -158,7 +158,7 @@ async def test_task_history_stops_at_import_boundary(session_client):
     r = await session_client.post(
         "/api/plan/import",
         files={"file": ("office.xlsx", buf.getvalue(), XLSX_MIME)},
-        data={"project_start": "2026-10-04"},
+        data={"project_start": "2026-10-04", "expected_version": "2"},  # after the edit above
     )
     assert r.status_code == 200, r.text
     body = (await session_client.get("/api/plan/tasks/1/history")).json()

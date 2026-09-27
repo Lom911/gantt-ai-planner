@@ -84,7 +84,11 @@ class LLM(Protocol):
         system: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         messages: list[dict[str, Any]],
-    ) -> AsyncIterator[LLMEvent]: ...
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[LLMEvent]:
+        """`max_tokens`: output cap for this call (the agent loop's remaining turn budget);
+        None means the LLM's configured maximum."""
+        ...
 
 
 class AnthropicLLM:
@@ -121,6 +125,7 @@ class AnthropicLLM:
         system: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         messages: list[dict[str, Any]],
+        max_tokens: int | None = None,
     ) -> AsyncIterator[LLMEvent]:
         cached = (
             [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
@@ -130,7 +135,7 @@ class AnthropicLLM:
         try:
             async with self._client.messages.stream(
                 model=self._model,
-                max_tokens=self._max_tokens,
+                max_tokens=min(max_tokens, self._max_tokens) if max_tokens else self._max_tokens,
                 system=system,  # type: ignore[arg-type]
                 tools=cached,  # type: ignore[arg-type]
                 messages=messages,  # type: ignore[arg-type]

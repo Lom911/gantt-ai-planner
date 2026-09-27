@@ -20,6 +20,7 @@ from app.api import (
     routes_events,
     routes_mcp_token,
     routes_meta,
+    routes_ops,
     routes_plan,
     routes_session,
 )
@@ -35,6 +36,7 @@ from app.services.cleanup import run_cleanup_cycle
 from app.services.events import EventBus
 from app.services.iplimit import SlidingWindowLimiter, client_key
 from app.services.locks import SessionLocks
+from app.services.ops import RequestMetrics
 from app.services.plan_service import PlanService
 
 logger = logging.getLogger("app.cleanup")
@@ -142,6 +144,7 @@ def create_app(
     # path="/" + mounting at "/mcp" below is what the McpOriginGate path rewrite targets;
     # stateless_http/json_response: no server-side session state, plain request/response.
     mcp_app = mcp.http_app(path="/", stateless_http=True, json_response=True)
+    request_metrics = RequestMetrics()
 
     @asynccontextmanager
     async def app_lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -149,11 +152,9 @@ def create_app(
         app.state.sessionmaker = sm
         app.state.service = service
         app.state.mcp = mcp
-        app.state.session_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
-        app.state.chat_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
-        app.state.chat_ip_day_limiter = SlidingWindowLimiter(window_seconds=86400)
+        app.state.request_metrics = request_metrics
+        # Sessions, chat and imports are limited in Postgres (app.services.ratelimit).
         app.state.mutation_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
-        app.state.import_ip_limiter = SlidingWindowLimiter(window_seconds=3600)
         cleanup_task = asyncio.create_task(_cleanup_loop(app, cfg))
         try:
             async with PlanToolClient(mcp) as tool_client:
@@ -164,6 +165,7 @@ def create_app(
                     service,
                     today=today_fn,
                     turn_token_budget=cfg.llm_turn_token_budget,
+                    max_output_tokens=cfg.llm_max_tokens,
                 )
                 yield
         finally:
@@ -184,7 +186,7 @@ def create_app(
     )
     # The last one added is the outermost: the access log also records the gate's own 403/429.
     app.add_middleware(McpOriginGate, settings=cfg)
-    app.add_middleware(AccessLogMiddleware)
+    app.add_middleware(AccessLogMiddleware, metrics=request_metrics)
     install_error_handlers(app)
     app.include_router(routes_session.router)
     app.include_router(routes_plan.router)
@@ -192,6 +194,7 @@ def create_app(
     app.include_router(routes_events.router)
     app.include_router(routes_mcp_token.router)
     app.include_router(routes_meta.router)
+    app.include_router(routes_ops.router)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
