@@ -250,14 +250,20 @@ async def create_mcp_token(
 
 async def get_active_mcp_token(
     db: AsyncSession, token_hash: bytes, now: datetime
-) -> McpTokenRow | None:
-    return await db.scalar(
-        select(McpTokenRow).where(
-            McpTokenRow.token_hash == token_hash,
-            McpTokenRow.revoked_at.is_(None),
-            McpTokenRow.expires_at > now,
+) -> tuple[McpTokenRow, datetime] | None:
+    """The live token with this hash and its session's last_seen_at, in one round trip."""
+    row = (
+        await db.execute(
+            select(McpTokenRow, SessionRow.last_seen_at)
+            .join(SessionRow, SessionRow.id == McpTokenRow.session_id)
+            .where(
+                McpTokenRow.token_hash == token_hash,
+                McpTokenRow.revoked_at.is_(None),
+                McpTokenRow.expires_at > now,
+            )
         )
-    )
+    ).first()
+    return (row[0], row[1]) if row else None
 
 
 async def latest_mcp_token(db: AsyncSession, session_id: uuid.UUID) -> McpTokenRow | None:

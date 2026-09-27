@@ -265,3 +265,38 @@ async def test_mcp_activity_keeps_the_session_alive(app, session_client):
     async with app.state.sessionmaker() as db:
         age = (await db.execute(text("SELECT now() - last_seen_at FROM sessions"))).scalar_one()
     assert age.total_seconds() < 60
+
+
+async def _activity_ages(app: Any) -> tuple[float, float]:
+    from sqlalchemy import text
+
+    async with app.state.sessionmaker() as db:
+        token_age = (
+            await db.execute(text("SELECT now() - last_used_at FROM mcp_tokens"))
+        ).scalar_one()
+        session_age = (
+            await db.execute(text("SELECT now() - last_seen_at FROM sessions"))
+        ).scalar_one()
+    return token_age.total_seconds(), session_age.total_seconds()
+
+
+async def test_mcp_activity_is_written_at_most_every_ten_minutes(app, session_client):
+    # Every MCP request verifies the token; rewriting last_used_at and last_seen_at on each one
+    # is a WAL write per request for timestamps that only matter at the scale of days.
+    from sqlalchemy import text
+
+    token = await _issue_token(session_client)
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE mcp_tokens SET last_used_at = now() - interval '1 minute'"))
+        await db.execute(text("UPDATE sessions SET last_seen_at = now() - interval '1 minute'"))
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    token_age, session_age = await _activity_ages(app)
+    assert token_age >= 50 and session_age >= 50  # fresh enough: left alone
+    async with app.state.sessionmaker() as db, db.begin():
+        await db.execute(text("UPDATE mcp_tokens SET last_used_at = now() - interval '11 minutes'"))
+        await db.execute(text("UPDATE sessions SET last_seen_at = now() - interval '11 minutes'"))
+    async with _mcp_client(app, token) as client:
+        await client.call_tool("get_plan", {})
+    token_age, session_age = await _activity_ages(app)
+    assert token_age < 10 and session_age < 10  # stale: touched
