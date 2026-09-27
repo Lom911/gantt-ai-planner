@@ -205,6 +205,11 @@ class PlanService:
         return version_no, plan, scheduled
 
     def _cache_put(self, version_id: int, plan: Plan, scheduled: ScheduledPlan) -> None:
+        if version_id in self._plan_cache:
+            # Concurrent cold reads of one version all miss, then all store it: keep the first
+            # entry, or its bytes would be counted once per reader for a single entry.
+            self._plan_cache.move_to_end(version_id)
+            return
         size = plan_json_size(plan)
         if size > PLAN_CACHE_MAX_BYTES // 4:
             return  # one huge plan would evict everything else
