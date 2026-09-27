@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { api } from "@/api/client";
+import { historySafeCommand } from "@/lib/mcpCommands";
 import { McpConnectDialog } from "./McpConnectDialog";
 
 vi.mock("@/api/client", async () => {
@@ -75,4 +76,13 @@ test("shows a live token's status and lets the user revoke it without having the
   fireEvent.click(screen.getByRole("button", { name: "Отозвать" }));
   await waitFor(() => expect(api.revokeMcpToken).toHaveBeenCalled());
   expect(screen.getByRole("button", { name: /Выпустить новый токен/ })).toBeInTheDocument();
+});
+
+test("offers a command that keeps the token out of the shell history", async () => {
+  render(<McpConnectDialog open onOpenChange={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "Выпустить токен" }));
+  const safe = historySafeCommand(sample.url);
+  expect(await screen.findByDisplayValue(safe)).toBeInTheDocument();
+  expect(safe).not.toContain(sample.token);
+  expect(safe).toContain("read -rs GANTT_MCP_TOKEN");
 });
