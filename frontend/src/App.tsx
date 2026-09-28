@@ -17,6 +17,7 @@ import { ProjectDates } from "@/components/gantt/ProjectDates";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { Toolbar } from "@/components/Toolbar";
 import { TaskModal } from "@/components/task/TaskModal";
+import { NewTaskModal } from "@/components/task/NewTaskModal";
 import { ImportDialog } from "@/components/import/ImportDialog";
 import { ResourcePanel } from "@/components/ResourcePanel";
 import type { Zoom } from "@/components/gantt/mapping";
@@ -33,6 +34,9 @@ function App() {
   const [focusedIds, flashFocused] = useFlashHighlight();
   const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  // The new-task form, when open: `anchorId` is the task it was opened after (its card's
+  // «Добавить после»), null from the toolbar.
+  const [newTask, setNewTask] = useState<{ anchorId: number | null } | null>(null);
 
   // Every plan change — from this tab, the agent, another tab, or an undo — arrives here via the
   // session-wide event bus, so this is the single source of highlighted ids (a click in the
@@ -86,6 +90,7 @@ function App() {
           zoom={zoom}
           onZoom={changeZoom}
           onImport={() => setImportOpen(true)}
+          onAddTask={() => setNewTask({ anchorId: null })}
           theme={theme}
           onTheme={setTheme}
         />
@@ -136,6 +141,18 @@ function App() {
             if (!open) setOpenTaskId(null);
           }}
           onNavigate={(id) => setOpenTaskId(id)}
+          onAddAfter={(id) => {
+            setOpenTaskId(null);
+            setNewTask({ anchorId: id });
+          }}
+          disabled={agentBusy}
+        />
+      )}
+      {data && newTask && (
+        <NewTaskModal
+          plan={data.plan}
+          anchorId={newTask.anchorId}
+          onClose={() => setNewTask(null)}
           disabled={agentBusy}
         />
       )}

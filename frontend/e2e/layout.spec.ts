@@ -42,6 +42,78 @@ test("hand-adjusted layout survives a reload and can be reset", async ({ page })
   await expect(page.getByRole("button", { name: "День" })).toHaveClass(/bg-primary/);
 });
 
+// A click on a date in the day scale tints that day's column down the whole chart, like the
+// "today" column; a second click on the same date clears it. It doesn't open any task.
+test("clicking a date in the day scale highlights its column until clicked again", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".wx-bar").first()).toBeVisible();
+  const cell = page.locator(".wx-scale > .wx-row:last-child > .wx-cell").nth(5);
+  await cell.click();
+  await expect(cell).toHaveClass(/gantt-selected-day/);
+  const head = (await cell.boundingBox())!;
+  const column = (await page.locator(".wx-gantt-holidays > .gantt-selected-day").boundingBox())!;
+  expect(Math.abs(column.x - head.x)).toBeLessThanOrEqual(1);
+  expect(column.height).toBeGreaterThan(100);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+
+  await cell.click();
+  await expect(page.locator(".gantt-selected-day")).toHaveCount(0);
+});
+
+// The same without a mouse: the day numbers are buttons with one tab stop; ←/→ move along the
+// row, Enter/Space toggle the column.
+test("a day column can be picked from the keyboard", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".wx-bar").first()).toBeVisible();
+  const days = page.locator(".wx-scale > .wx-row:last-child > .wx-cell");
+  await expect(days.first()).toHaveAttribute("role", "button");
+  await expect(page.locator('.wx-scale [role="button"][tabindex="0"]')).toHaveCount(1);
+
+  const start = days.nth(5);
+  await start.focus();
+  await page.keyboard.press("Enter");
+  await expect(start).toHaveClass(/gantt-selected-day/);
+  await expect(start).toHaveAttribute("aria-pressed", "true");
+
+  await page.keyboard.press("ArrowRight");
+  await expect(days.nth(6)).toBeFocused();
+  await page.keyboard.press(" ");
+  await expect(days.nth(6)).toHaveClass(/gantt-selected-day/);
+  await expect(start).not.toHaveClass(/gantt-selected-day/);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+// A single click on a task only selects it (its grid row is tinted); the card opens on a double
+// click — on the row or the bar — or from the pencil at the end of the row.
+test("a click selects a task, a double click or the pencil opens its card", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".wx-bar").first()).toBeVisible();
+  const row = page.locator('.wx-table-container [data-id="4"]').first();
+  const dialog = page.getByRole("dialog");
+
+  await row.locator(".wx-col-text").click();
+  await expect(row).toHaveClass(/wx-selected/);
+  await expect(dialog).toHaveCount(0);
+  await page.locator('.wx-bar[data-id="6"]').click();
+  await expect(page.locator('.wx-table-container [data-id="6"]').first()).toHaveClass(/wx-selected/);
+  await expect(dialog).toHaveCount(0);
+
+  await row.locator(".wx-col-text").dblclick();
+  await expect(dialog.getByRole("heading").first()).toHaveText(/^№4 /);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  await page.locator('.wx-bar[data-id="6"]').dblclick();
+  await expect(dialog.getByRole("heading").first()).toHaveText(/^№6 /);
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "Редактировать задачу №2", exact: true }).click();
+  await expect(dialog.getByRole("heading").first()).toHaveText(/^№2 /);
+});
+
 test("the chat folds into a rail so the chart gets the whole width, and stays folded after a reload", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/");

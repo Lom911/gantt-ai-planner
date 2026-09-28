@@ -3,13 +3,24 @@ import { Gantt, Tooltip, Willow, WillowDark, type IApi } from "@svar-ui/react-ga
 import "@svar-ui/react-gantt/all.css";
 import "./wx-icons/wx-icons.css";
 import "./gantt.css";
+import { Pencil } from "lucide-react";
 import { toast } from "sonner";
-import { ZOOM_PRESETS, closestTaskId, highlightDay, isDragEnd, toSvarLinks, toSvarTasks, type Zoom } from "./mapping";
+import {
+  ZOOM_PRESETS,
+  closestTaskId,
+  dayAtOffset,
+  highlightDay,
+  isDragEnd,
+  toSvarLinks,
+  toSvarTasks,
+  type ScaleCell,
+  type Zoom,
+} from "./mapping";
 import { interpretBarChange, linkDeletionToOperation, linkToOperation } from "./interactions";
 import { RuLocale } from "./locale";
 import type { Operation, ScheduledPlan } from "@/api/types";
-import { formatRu, addDays, parseISODate } from "@/lib/dates";
-import { loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layoutPrefs";
+import { formatRu, addDays, parseISODate, toISODate } from "@/lib/dates";
+import { loadLayoutPrefs, saveLayoutPrefs, savedGridWidth } from "@/lib/layoutPrefs";
 
 const TASK_TYPES = [
   { id: "task", label: "Задача" },
@@ -66,6 +77,36 @@ function BarTooltip({ data }: { api: IApi; data: Record<string, unknown> }) {
     </div>
   );
 }
+
+// The grid's last column: an explicit way into the task modal, since a single click on a row only
+// selects it (a double click opens the modal too). The button sits inside the row's `[data-id]`
+// element, so the container's onClick resolves the task with closestTaskId like any other click.
+// (`row` is SVAR's grid IRow, `{[key: string]: any}` — our SvarTask at runtime.)
+function EditCell({ row }: { row: { [key: string]: unknown } }) {
+  return (
+    <button
+      type="button"
+      className="gantt-edit-task inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+      title="Редактировать"
+      aria-label={`Редактировать задачу №${row.id}`}
+    >
+      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+    </button>
+  );
+}
+const editColumn = (width: number) => ({ id: "edit", header: "", width, align: "center" as const, resize: false, cell: EditCell });
+const EDIT_WIDTH = 36;
+// Phone: № + Задача + pencil (+1px grid border) stay within 185px (checked in production.spec.ts) so the timeline
+// keeps more than half of a 390px screen.
+const NARROW_COLUMNS = [
+  { id: "id", header: "№", width: 36, align: "center" as const },
+  { id: "text", header: "Задача", width: 116, flexgrow: 1 },
+  editColumn(32),
+];
+
+// The bottom row of the scale holds the day numbers (in day zoom): the cells a click or a key
+// picks a column with (see toggleDayAt and the keyboard handling below).
+const DAY_CELL = ".wx-scale > .wx-row:last-child > .wx-cell";
 
 export function GanttView(props: {
   plan: ScheduledPlan;
@@ -136,20 +177,18 @@ export function GanttView(props: {
   const columns = useMemo(() => {
     const w = (id: string, fallback: number) => prefs.columns?.[id] ?? fallback;
     return narrow
-      ? [
-          { id: "id", header: "№", width: 40, align: "center" as const },
-          { id: "text", header: "Задача", width: 140, flexgrow: 1 },
-        ]
+      ? NARROW_COLUMNS
       : [
           { id: "id", header: "№", width: w("id", 44), align: "center" as const },
           { id: "text", header: "Задача", width: w("text", 180), flexgrow: 1 },
           { id: "assignee", header: "Исполнитель", width: w("assignee", 130) },
           { id: "startLabel", header: "Начало", width: w("startLabel", 76), align: "center" as const },
           { id: "workDays", header: "Дн.", width: w("workDays", 48), align: "center" as const },
+          editColumn(EDIT_WIDTH),
         ];
   }, [narrow, prefs]);
   const gridWidth = useMemo(
-    () => (!narrow && prefs.gridWidth) || columns.reduce((sum, c) => sum + c.width, 0),
+    () => (!narrow && savedGridWidth(prefs, EDIT_WIDTH)) || columns.reduce((sum, c) => sum + c.width, 0),
     [columns, narrow, prefs],
   );
   const narrowRef = useRef(narrow);
@@ -170,7 +209,7 @@ export function GanttView(props: {
 
     // Remember what the user resizes by hand (see layoutPrefs); the phone layout isn't saved.
     api.on("resize-grid", ({ width }: { width: number }) => {
-      if (!narrowRef.current && width > 0) saveLayoutPrefs({ gridWidth: Math.round(width) });
+      if (!narrowRef.current && width > 0) saveLayoutPrefs({ gridWidth: Math.round(width), gridIncludesEdit: true });
     });
     api.on("set-columns", ({ columns: cols }: { columns: { id?: string; width?: number }[] }) => {
       if (narrowRef.current) return;
@@ -180,15 +219,12 @@ export function GanttView(props: {
       saveLayoutPrefs({ columns: widths });
     });
 
-    // `select-task` also fires on keyboard grid navigation, so opening the task modal from it
-    // would pop the modal while the user is just arrowing through rows. Instead, a real pointer
-    // click is handled by the container's own onClick below (via `closestTaskId`); double-click
-    // still routes through `show-editor`, which we intercept to open our modal instead of
-    // SVAR's built-in editor.
-    api.intercept("show-editor", ({ id }: { id: number | string | null }) => {
-      if (id != null) handlers.current.onOpenTask(Number(id));
-      return false;
-    });
+    // A single click on a row or bar only selects the task (SVAR's own `select-task`, which
+    // tints the row); the modal opens on a double click or the grid's pencil button — both
+    // handled by the container below. SVAR's own double-click `show-editor` is blocked: it would
+    // open SVAR's built-in editor, and it doesn't fire at all while the chart is read-only
+    // (agent busy), when the modal should still open to view the task.
+    api.intercept("show-editor", () => false);
 
     // A bar drag or resize is committed as an `update-task` event carrying either `diff` (the
     // number of cells the bar moved/grew by, set by a move/resize commit) or `inProgress` (set
@@ -249,10 +285,81 @@ export function GanttView(props: {
   // `fonts={false}` below: by default they inject SVAR's CDN icon/font stylesheet, which the
   // production CSP blocks — the icon font is self-hosted instead (wx-icons/wx-icons.css).
   const projectStart = props.plan.project_start;
+  // A day column the user picked by clicking its date in the scale header (a second click on the
+  // same date clears it) — to line bars up against one date by eye, like the "today" tint.
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const highlightTime = useCallback(
-    (d: Date, unit: string) => highlightDay(d, unit, projectStart, new Date()),
-    [projectStart],
+    (d: Date, unit: string) => highlightDay(d, unit, projectStart, new Date(), selectedDay),
+    [projectStart, selectedDay],
   );
+  const dayOfCell = useCallback(
+    (cell: Element): string | null => {
+      const scale = cell.closest(".wx-scale");
+      // Each cell also carries `date` and `unit` at runtime (the store builds them, and SVAR's own
+      // header passes them to highlightTime), but GanttScaleCell's declared type leaves them out.
+      const cells = api?.getState()._scales?.rows.at(-1)?.cells as ScaleCell[] | undefined;
+      if (!scale || !cells) return null;
+      const rect = cell.getBoundingClientRect();
+      return dayAtOffset(cells, rect.left + rect.width / 2 - scale.getBoundingClientRect().left);
+    },
+    [api],
+  );
+  const toggleDayAt = (cell: Element) => {
+    const day = dayOfCell(cell);
+    if (day) setSelectedDay((current) => (current === day ? null : day));
+  };
+
+  // Keyboard access to the same picking. SVAR renders the day cells as plain divs, so they're
+  // turned into buttons here: one roving tab stop (the focused cell, else the picked day, else
+  // today, else the first visible day), ←/→ move along the row, Enter/Space toggle (onKeyDown
+  // below). SVAR re-renders the virtualized header on scroll and zoom, so a MutationObserver on
+  // it re-applies the attributes; it doesn't watch attributes, so setting them can't loop.
+  const zoom = props.zoom;
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root || !api) return;
+    const today = toISODate(new Date());
+    let frame = 0;
+    const decorate = () => {
+      frame = 0;
+      const cells = Array.from(root.querySelectorAll<HTMLElement>(DAY_CELL));
+      let focused: HTMLElement | undefined;
+      let picked: HTMLElement | undefined;
+      let todays: HTMLElement | undefined;
+      let first: HTMLElement | undefined;
+      for (const cell of cells) {
+        const day = zoom === "day" ? dayOfCell(cell) : null;
+        if (!day) {
+          for (const attr of ["tabindex", "role", "aria-pressed", "aria-label"]) cell.removeAttribute(attr);
+          continue;
+        }
+        cell.setAttribute("role", "button");
+        cell.setAttribute("aria-pressed", String(day === selectedDay));
+        cell.setAttribute("aria-label", `Выделить столбец ${formatRu(day)}`);
+        cell.tabIndex = -1;
+        if (cell === document.activeElement) focused = cell;
+        if (day === selectedDay) picked = cell;
+        if (day === today) todays = cell;
+        first ??= cell;
+      }
+      const stop = focused ?? picked ?? todays ?? first;
+      if (stop) stop.tabIndex = 0;
+    };
+    const inScale = (node: Node) =>
+      (node instanceof Element ? node : node.parentElement)?.closest(".wx-scale") != null ||
+      (node instanceof Element && node.querySelector(".wx-scale") != null);
+    const observer = new MutationObserver((mutations) => {
+      if (!frame && mutations.some((m) => inScale(m.target) || Array.from(m.addedNodes).some(inScale))) {
+        frame = requestAnimationFrame(decorate);
+      }
+    });
+    observer.observe(root, { childList: true, subtree: true, characterData: true });
+    decorate();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [api, zoom, selectedDay, dayOfCell]);
 
   // Where the last press started, to tell a click from the end of a bar drag (see isDragEnd).
   const pointerDown = useRef<{ x: number; y: number } | null>(null);
@@ -262,15 +369,44 @@ export function GanttView(props: {
   return (
     <div
       ref={containerRef}
-      className="gantt-host h-full min-h-0"
+      className={`gantt-host h-full min-h-0${props.zoom === "day" ? " gantt-day-zoom" : ""}`}
       // Capture phase: SVAR's own drag handling must not be able to hide the press from us.
       onPointerDownCapture={(e) => {
         pointerDown.current = { x: e.clientX, y: e.clientY };
       }}
       onClick={(e) => {
         if (isDragEnd(pointerDown.current, { x: e.clientX, y: e.clientY })) return;
+        // The bottom scale row holds the day numbers (in day zoom): a click there picks that column.
+        const dayCell = e.target instanceof Element ? e.target.closest(DAY_CELL) : null;
+        if (dayCell) {
+          toggleDayAt(dayCell);
+          return;
+        }
+        if (e.target instanceof Element && e.target.closest(".gantt-edit-task")) {
+          const id = closestTaskId(e.target);
+          if (id != null) handlers.current.onOpenTask(id);
+        }
+      }}
+      onDoubleClick={(e) => {
+        if (isDragEnd(pointerDown.current, { x: e.clientX, y: e.clientY })) return;
         const id = closestTaskId(e.target);
         if (id != null) handlers.current.onOpenTask(id);
+      }}
+      onKeyDown={(e) => {
+        const cell = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>(DAY_CELL) : null;
+        if (!cell?.hasAttribute("role")) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggleDayAt(cell);
+          return;
+        }
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        const next = e.key === "ArrowRight" ? cell.nextElementSibling : cell.previousElementSibling;
+        if (!(next instanceof HTMLElement)) return;
+        e.preventDefault();
+        cell.tabIndex = -1;
+        next.tabIndex = 0;
+        next.focus();
       }}
     >
       <RuLocale>

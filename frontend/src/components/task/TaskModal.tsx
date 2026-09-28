@@ -29,6 +29,7 @@ export function TaskModal({
   open,
   onOpenChange,
   onNavigate,
+  onAddAfter,
   disabled,
 }: {
   task: ScheduledTask | null;
@@ -37,6 +38,8 @@ export function TaskModal({
   open: boolean;
   onOpenChange(open: boolean): void;
   onNavigate(id: number): void;
+  // «Добавить после»: open the new-task form anchored on this task (see NewTaskModal).
+  onAddAfter(id: number): void;
   disabled: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -51,6 +54,9 @@ export function TaskModal({
     null,
   );
   const [saving, setSaving] = useState(false);
+  // «Удалить задачу» asks once more inline (the footer turns into a confirmation) before it sends
+  // delete_task. Keyed by task id so it never carries over to another task's card.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
 
   if (task) {
     if (!state || state.taskId !== task.id) {
@@ -63,8 +69,11 @@ export function TaskModal({
         setState({ taskId: task.id, form: rebased.form, baseline: rebased.baseline, error: state.error });
       }
     }
-  } else if (state) {
-    setState(null);
+  } else {
+    // Closed (the modal stays mounted with no task): forget the form and a pending delete
+    // confirmation, so reopening the same task shows its normal footer.
+    if (state) setState(null);
+    if (confirmDeleteId != null) setConfirmDeleteId(null);
   }
 
   if (!task || !state) return null;
@@ -88,6 +97,7 @@ export function TaskModal({
 
   const ops = buildTaskOps(task, form, baseline);
   const canSave = !disabled && !saving && ops.length > 0;
+  const confirmingDelete = confirmDeleteId === task.id;
 
   const handleSave = async () => {
     const validationError = validateTaskForm(form);
@@ -111,6 +121,25 @@ export function TaskModal({
       setError(err instanceof ApiError ? err.message : "Не удалось сохранить изменения");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Its links are kept: the backend reconnects every predecessor to every successor (A→B→C
+  // becomes A→C), so the rest of the chain keeps its order. Undo brings the task back.
+  const handleDelete = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await api.applyOps([{ op: "delete_task", id: task.id }], cachedPlanVersion(queryClient));
+      queryClient.setQueryData(PLAN_KEY, res);
+      toast.success(res.summary);
+      onOpenChange(false);
+    } catch (err) {
+      refetchOnConflict(queryClient, err);
+      setError(err instanceof ApiError ? err.message : "Не удалось удалить задачу");
+    } finally {
+      setSaving(false);
+      setConfirmDeleteId(null);
     }
   };
 
@@ -251,23 +280,69 @@ export function TaskModal({
 
           {error && <p className="text-sm text-destructive">{error}</p>}
 
-          <div className="mt-2 flex justify-end gap-2">
-            <button
-              type="button"
-              className="rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
-              onClick={() => onOpenChange(false)}
-            >
-              Отмена
-            </button>
-            <button
-              type="button"
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
-              disabled={!canSave}
-              onClick={() => void handleSave()}
-            >
-              Сохранить
-            </button>
-          </div>
+          {confirmingDelete ? (
+            <div className="mt-2 flex flex-col gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+              <p>
+                Удалить задачу №{task.id} «{task.name}»?
+                {predecessors.length > 0 && successors.length > 0 &&
+                  " Её предшественники станут предшественниками её последователей."}{" "}
+                Вернуть можно кнопкой «Отменить».
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border border-input px-3 py-1.5 hover:bg-accent"
+                  onClick={() => setConfirmDeleteId(null)}
+                >
+                  Не удалять
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md bg-destructive px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-50"
+                  disabled={disabled || saving}
+                  onClick={() => void handleDelete()}
+                >
+                  Удалить
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="rounded-md px-2 py-1.5 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                disabled={disabled || saving}
+                onClick={() => setConfirmDeleteId(task.id)}
+              >
+                Удалить задачу
+              </button>
+              <button
+                type="button"
+                className="rounded-md px-2 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
+                disabled={disabled}
+                onClick={() => onAddAfter(task.id)}
+              >
+                Добавить после
+              </button>
+              <div className="ml-auto flex gap-2">
+                <button
+                  type="button"
+                  className="rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
+                  onClick={() => onOpenChange(false)}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                  disabled={!canSave}
+                  onClick={() => void handleSave()}
+                >
+                  Сохранить
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>

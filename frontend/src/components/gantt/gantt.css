@@ -19,6 +19,7 @@
   --gantt-changed: #aa3bff;
   --gantt-changed-bg: rgba(170, 59, 255, 0.16);
   --gantt-today: rgba(170, 59, 255, 0.08);
+  --gantt-selected-day: rgba(57, 131, 235, 0.14);
   --gantt-start: #16a34a;
   /* SVAR Willow's default bar color, for the legend (which sits outside SVAR's theme scope). */
   --gantt-task: #3983eb;
@@ -30,6 +31,7 @@
   --gantt-changed: #c084fc;
   --gantt-changed-bg: rgba(192, 132, 252, 0.2);
   --gantt-today: rgba(192, 132, 252, 0.12);
+  --gantt-selected-day: rgba(55, 169, 239, 0.2);
   --gantt-start: #4ade80;
   --gantt-task: #37a9ef;
 }
@@ -40,6 +42,28 @@
 .wx-theme.wx-willow-theme,
 .wx-theme.wx-willow-dark-theme {
   --wx-font-family: system-ui, "Segoe UI", sans-serif;
+}
+
+/* A single click on a row or bar selects the task (a double click opens it). Willow's own
+   selection tint (#eaedf5, barely off the white rows) read as "nothing happened", so it's the
+   same blue family as the picked-day column instead, plus an accent on the row's left edge. */
+.wx-theme.wx-willow-theme {
+  --wx-gantt-select-color: rgba(57, 131, 235, 0.14);
+}
+.wx-theme.wx-willow-dark-theme {
+  --wx-gantt-select-color: rgba(55, 169, 239, 0.22);
+}
+.gantt-host .wx-table {
+  --wx-table-select-border: inset 3px 0 0 var(--gantt-task) !important;
+}
+
+/* The pencil column (EditCell in GanttView): the button needs the whole narrow cell, not what's
+   left after SVAR's 12px side padding. */
+.wx-cell.wx-col-edit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 !important;
 }
 
 .wx-bar.critical {
@@ -81,12 +105,34 @@
   box-shadow: inset 2px 0 0 var(--gantt-start);
 }
 
+/* …and "gantt-selected-day" for the column whose date the user clicked in the scale header. A
+   different hue from today's so the two can't be mistaken; declared after .gantt-today so a
+   selected today shows as selected. The date itself is emphasized in the header. */
+.gantt-selected-day {
+  background: var(--gantt-selected-day);
+}
+.wx-scale .gantt-selected-day {
+  color: var(--gantt-task);
+  font-weight: 700;
+}
+
+/* Only the day scale's numbers are clickable (a week/month cell isn't one day); they're also
+   keyboard buttons (GanttView), so the focused one needs a visible ring. */
+.gantt-day-zoom .wx-scale > .wx-row:last-child > .wx-cell {
+  cursor: pointer;
+}
+.gantt-day-zoom .wx-scale > .wx-row:last-child > .wx-cell:focus-visible {
+  outline: 2px solid var(--gantt-task);
+  outline-offset: -2px;
+}
+
 /* In the chart body SVAR renders each highlighted day as a div inside .wx-gantt-holidays with only
    an inline left/width: the positioning comes from its own `.wx-weekend` class. Our classes need
    the same, or the column collapses to zero height at the chart's left edge (so the "today" tint
    never showed below the header). */
 .wx-gantt-holidays > .gantt-today,
-.wx-gantt-holidays > .gantt-project-start {
+.wx-gantt-holidays > .gantt-project-start,
+.wx-gantt-holidays > .gantt-selected-day {
   position: absolute;
   height: 100%;
 }

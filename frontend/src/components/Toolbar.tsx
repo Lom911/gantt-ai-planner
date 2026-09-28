@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Download, Link2, Monitor, Moon, MoreVertical, Redo2, RotateCcw, Sun, Undo2, Upload } from "lucide-react";
+import { Download, Link2, Monitor, Moon, MoreVertical, Plus, Redo2, RotateCcw, Sun, Undo2, Upload } from "lucide-react";
 import { api, ApiError, exportUrl } from "@/api/client";
 import type { PlanResponse } from "@/api/types";
 import { cachedPlanVersion, PLAN_KEY, refetchOnConflict } from "@/hooks/usePlan";
@@ -39,6 +39,7 @@ export function Toolbar({
   zoom,
   onZoom,
   onImport,
+  onAddTask,
   theme,
   onTheme,
 }: {
@@ -47,6 +48,7 @@ export function Toolbar({
   zoom: Zoom;
   onZoom(zoom: Zoom): void;
   onImport(): void;
+  onAddTask(): void;
   theme: ThemeMode;
   onTheme(mode: ThemeMode): void;
 }) {
@@ -81,12 +83,23 @@ export function Toolbar({
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
       <button
         type="button"
+        title="Добавить задачу"
+        aria-label="Добавить задачу"
+        disabled={busy}
+        className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 sm:px-3"
+        onClick={onAddTask}
+      >
+        <Plus className="h-4 w-4" /> <span className="hidden sm:inline">Задача</span>
+      </button>
+
+      <button
+        type="button"
         title="Загрузить Excel"
         aria-label="Загрузить Excel"
         className="inline-flex items-center gap-1.5 rounded-md border border-input px-2 py-1.5 text-sm hover:bg-accent sm:px-3"
         onClick={onImport}
       >
-        <Upload className="h-4 w-4" /> <span className="hidden sm:inline">Загрузить Excel</span>
+        <Download className="h-4 w-4" /> <span className="hidden sm:inline">Загрузить Excel</span>
       </button>
 
       <a
@@ -100,7 +113,7 @@ export function Toolbar({
         aria-label="Экспорт"
         className="inline-flex items-center gap-1.5 rounded-md border border-input px-2 py-1.5 text-sm hover:bg-accent sm:px-3"
       >
-        <Download className="h-4 w-4" /> <span className="hidden sm:inline">Экспорт</span>
+        <Upload className="h-4 w-4" /> <span className="hidden sm:inline">Экспорт</span>
       </a>
 
       <div className="mx-1 h-5 w-px bg-border" />

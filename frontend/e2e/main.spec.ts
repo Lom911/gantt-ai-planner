@@ -32,6 +32,6 @@ test("demo → import → chat edit → export", async ({ page }) => {
   await page.getByRole("link", { name: "Экспорт" }).click();
   expect((await download).suggestedFilename()).toMatch(/^plan-\d{4}-\d{2}-\d{2}\.xlsx$/);
 
-  await page.getByText("Упаковка мебели").last().click();
+  await page.getByText("Упаковка мебели").last().dblclick();
   await expect(page.getByRole("dialog")).toContainText("Упаковка мебели");
 });

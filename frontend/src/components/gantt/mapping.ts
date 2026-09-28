@@ -50,9 +50,9 @@ export function isDragEnd(down: { x: number; y: number } | null, up: { x: number
 }
 
 // SVAR (@svar-ui/lib-dom `locate`) marks both grid rows and gantt bars with a `data-id`
-// attribute holding the task id. We use it to open the task modal only on a genuine pointer
-// click (bubbling up from the clicked row/bar to our own container's onClick), instead of
-// SVAR's `select-task` API event, which also fires on keyboard grid navigation.
+// attribute holding the task id. We use it to open the task modal from a genuine pointer
+// double click or the grid's pencil button (bubbling up from the row/bar to our own
+// container), instead of SVAR's API events (`select-task` also fires on keyboard navigation).
 export function closestTaskId(target: EventTarget | null): number | null {
   if (!(target instanceof Element)) return null;
   // A click on a bar's link connector (`.wx-link`, the little dot at each end used to draw a
@@ -98,11 +98,35 @@ export const ZOOM_PRESETS: Record<Zoom, { scales: IScaleConfig[]; cellWidth: num
 // chart body column). Day scale only — a week or month cell spans many days, so there's no single
 // column to mark. "gantt-project-start" draws the line the whole schedule is counted from: tasks
 // without predecessors start on the project start date. (SVAR's own `markers` would label it,
-// but the MIT build's store resets them — a PRO feature.)
-export function highlightDay(d: Date, unit: string, projectStart: string, today: Date): string {
+// but the MIT build's store resets them — a PRO feature.) "gantt-selected-day" is the column the
+// user picked by clicking its date in the scale header (see dayAtOffset).
+export function highlightDay(
+  d: Date,
+  unit: string,
+  projectStart: string,
+  today: Date,
+  selectedDay: string | null = null,
+): string {
   if (unit !== "day") return "";
   const classes: string[] = [];
+  const iso = toISODate(d);
   if (d.toDateString() === today.toDateString()) classes.push("gantt-today");
-  if (toISODate(d) === projectStart) classes.push("gantt-project-start");
+  if (iso === projectStart) classes.push("gantt-project-start");
+  if (iso === selectedDay) classes.push("gantt-selected-day");
   return classes.join(" ");
+}
+
+// SVAR's scale header cells carry no date attribute, so a click on one is mapped back to a day
+// through the scale's own cell list (`_scales.rows[last].cells`, laid out left to right from the
+// scale's left edge): the ISO date of the day cell under `x`, or null off the scale or when the
+// bottom row isn't days (week/month zoom).
+export interface ScaleCell { date: Date; width: number; unit: string }
+export function dayAtOffset(cells: readonly ScaleCell[], x: number): string | null {
+  if (x < 0) return null;
+  let left = 0;
+  for (const cell of cells) {
+    if (x < left + cell.width) return cell.unit === "day" ? toISODate(cell.date) : null;
+    left += cell.width;
+  }
+  return null;
 }
