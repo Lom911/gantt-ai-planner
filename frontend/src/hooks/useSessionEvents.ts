@@ -44,6 +44,35 @@ export function shouldRefetchPlan(cachedVersion: number | undefined, eventVersio
   return cachedVersion !== eventVersion;
 }
 
+// Who changed the plan (`agent`, `user`, `mcp`, …), or null when the payload doesn't say.
+export function parsePlanSource(data: string): string | null {
+  try {
+    const payload = JSON.parse(data) as PlanChangedPayload;
+    return typeof payload.source === "string" ? payload.source : null;
+  } catch {
+    return null;
+  }
+}
+
+// How to show a change whose tasks are all off screen (see GanttView's `reveal`): scroll the chart
+// to it when the user asked for it — the agent's turn, or an edit this tab itself made (`local`:
+// an undo, the task card, a new task) — and only offer to, with a notice, when it came from
+// elsewhere (another tab, an external MCP client), so the chart doesn't jump under someone looking
+// at it. Undo/redo carry the source of whoever pressed them, so "this tab" is told by `local`.
+export type RevealMode = "scroll" | "notice";
+export function revealMode(source: string | null, local: boolean): RevealMode {
+  if (source === "agent") return "scroll";
+  return local && source !== "mcp" ? "scroll" : "notice";
+}
+
+// What a `plan_changed` event tells the app besides the ids to highlight.
+export interface PlanChange {
+  source: string | null;
+  version: number | null;
+  // This tab already holds the announced version: it wrote it itself (or already fetched it).
+  local: boolean;
+}
+
 // Sources that replace the whole plan: every task id is "changed", so highlighting them would
 // just paint the entire chart in the highlight colour.
 const REPLACING_SOURCES = new Set(["import", "reset", "seed"]);
@@ -69,7 +98,7 @@ export function parsePlanChanged(data: string): number[] {
 // been missed) and reconnects. If the session can't be re-established (server down, per-IP
 // session limit) it just waits longer: refetching then would restart the plan query and hide its
 // error behind "loading", and a fixed short delay would hammer the server.
-export function useSessionEvents(onPlanChanged: (ids: number[]) => void): { agentBusy: boolean } {
+export function useSessionEvents(onPlanChanged: (ids: number[], change: PlanChange) => void): { agentBusy: boolean } {
   const queryClient = useQueryClient();
   const [agentBusy, setAgentBusy] = useState(false);
   const onPlanChangedRef = useRef(onPlanChanged);
@@ -94,10 +123,10 @@ export function useSessionEvents(onPlanChanged: (ids: number[]) => void): { agen
 
     const handlePlanChanged = (event: Event) => {
       const data = (event as MessageEvent<string>).data;
-      if (shouldRefetchPlan(cachedPlanVersion(queryClient), parsePlanVersion(data))) {
-        void queryClient.invalidateQueries({ queryKey: PLAN_KEY });
-      }
-      onPlanChangedRef.current(parsePlanChanged(data));
+      const version = parsePlanVersion(data);
+      const local = !shouldRefetchPlan(cachedPlanVersion(queryClient), version);
+      if (!local) void queryClient.invalidateQueries({ queryKey: PLAN_KEY });
+      onPlanChangedRef.current(parsePlanChanged(data), { source: parsePlanSource(data), version, local });
     };
 
     // A mass deletion requested by an external MCP client waits for approval in the app; the

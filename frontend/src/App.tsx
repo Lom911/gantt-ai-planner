@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
 import type { Operation } from "@/api/types";
 import { cachedPlanVersion, PLAN_KEY, refetchOnConflict, usePlan } from "@/hooks/usePlan";
-import { useFlashHighlight } from "@/hooks/useFlashHighlight";
-import { useSessionEvents } from "@/hooks/useSessionEvents";
+import { REVEAL_HIGHLIGHT_MS, useFlashHighlight } from "@/hooks/useFlashHighlight";
+import { revealMode, useSessionEvents, type RevealMode } from "@/hooks/useSessionEvents";
 import { useTheme } from "@/hooks/useTheme";
 import { SplitLayout } from "@/components/SplitLayout";
 import { GanttView } from "@/components/gantt/GanttView";
@@ -43,9 +43,21 @@ function App() {
   // chat's diff summary sets it too, via `onFocusTask` below). The highlight clears after
   // HIGHLIGHT_MS; imports/resets report no ids (see parsePlanChanged).
   const { data: pendingConfirmation } = useConfirmation();
-  const { agentBusy } = useSessionEvents((ids) => {
-    if (ids.length) flashFocused(ids);
+  // Changed tasks the chart should bring into view if none of them is on screen (GanttView checks
+  // once the plan with that `version` is drawn; null version = no need to wait, e.g. a click in
+  // the chat's diff summary).
+  const [reveal, setReveal] = useState<{ ids: number[]; mode: RevealMode; version: number | null; key: number } | null>(
+    null,
+  );
+  const revealSeq = useRef(0);
+  const requestReveal = (ids: number[], mode: RevealMode, version: number | null) =>
+    setReveal({ ids, mode, version, key: ++revealSeq.current });
+  const { agentBusy } = useSessionEvents((ids, change) => {
+    if (!ids.length) return;
+    flashFocused(ids);
+    requestReveal(ids, revealMode(change.source, change.local), change.version);
   });
+  const readyReveal = reveal && data && (reveal.version == null || reveal.version === data.version) ? reveal : null;
 
   const openTask = data?.plan.tasks.find((t) => t.id === openTaskId) ?? null;
 
@@ -117,6 +129,9 @@ function App() {
                     dark={isDark}
                     onOpenTask={(id) => setOpenTaskId(id)}
                     onApply={onApplyPlanOps}
+                    reveal={readyReveal}
+                    onRevealed={() => setReveal(null)}
+                    onFlash={(ids) => flashFocused(ids, REVEAL_HIGHLIGHT_MS)}
                   />
                 </div>
                 <GanttLegend />
@@ -124,7 +139,13 @@ function App() {
               </div>
             }
             right={
-              <ChatPanel onFocusTask={(id) => flashFocused([id])} agentBusy={agentBusy} />
+              <ChatPanel
+                onFocusTask={(id) => {
+                  flashFocused([id]);
+                  requestReveal([id], "scroll", null);
+                }}
+                agentBusy={agentBusy}
+              />
             }
             chatBusy={agentBusy}
           />

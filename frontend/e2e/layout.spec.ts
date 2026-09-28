@@ -241,3 +241,55 @@ test("weekends are tinted and the tooltip tells calendar days from working days"
   await hoverTooltip(page, b.x + b.width / 2, b.y + b.height / 2, `из них ${crossing.duration} рабоч`);
   await expect(page.getByRole("tooltip")).toContainText(`${days(crossing)} д`);
 });
+
+// A change to a task that's off screen used to happen unseen. The agent's change scrolls the chart
+// to it; one from elsewhere (here: straight to the API, as another tab or an MCP client would)
+// raises a notice whose «Показать» scrolls there; a click on a change in the chat scrolls too.
+test("changes to tasks off screen are brought into view", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".wx-bar").first()).toBeVisible();
+  const onScreen = (id: number) =>
+    page.evaluate((id) => {
+      const bar = document.querySelector(`.wx-bar[data-id="${id}"]`);
+      const chart = document.querySelector(".wx-chart")!.getBoundingClientRect();
+      const gantt = document.querySelector(".wx-gantt")!.getBoundingClientRect();
+      const top = document.querySelector(".wx-scale")?.getBoundingClientRect().bottom ?? gantt.top;
+      if (!bar) return false;
+      const b = bar.getBoundingClientRect();
+      return b.left < chart.right && b.right > chart.left && b.top < gantt.bottom && b.bottom > top;
+    }, id);
+  const scrollHome = async () => {
+    await page.locator(".wx-gantt").evaluate((el) => el.scrollTo({ top: 0 }));
+    await page.locator(".wx-chart").evaluate((el) => el.scrollTo({ left: 0 }));
+    await expect.poll(() => onScreen(21)).toBe(false);
+  };
+  await expect.poll(() => onScreen(1)).toBe(true);
+  expect(await onScreen(21)).toBe(false); // the last row is below the visible ones
+
+  // 1. The agent changes №21: the chart scrolls to it.
+  const input = page.getByRole("textbox", { name: /сообщение/i });
+  await input.fill("Назначь задачу 21 на Игоря Петрова");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText(/Изменено задач: \d+/).first()).toBeVisible({ timeout: 20_000 });
+  await expect.poll(() => onScreen(21), { timeout: 10_000 }).toBe(true);
+
+  // 2. A change from elsewhere: no jump, a notice instead; «Показать» scrolls to the task.
+  await scrollHome();
+  await page.request.post("/api/plan/operations", {
+    data: { ops: [{ op: "update_task", id: 21, duration: 6 }] },
+    headers: { Origin: new URL(page.url()).origin },
+  });
+  const notice = page.getByRole("status").filter({ hasText: "вне видимой области" });
+  await expect(notice).toContainText(/Изменено \d+ задач/); // №21 and whatever its new duration pushed
+  expect(await onScreen(21)).toBe(false);
+  await notice.getByRole("button", { name: "Показать" }).click();
+  await expect.poll(() => onScreen(21), { timeout: 10_000 }).toBe(true);
+  await expect(notice).toHaveCount(0);
+
+  // 3. A click on the change in the chat's summary scrolls to that task as well.
+  await scrollHome();
+  await page.getByText(/Изменено задач: \d+/).first().click();
+  await page.getByRole("button", { name: /№21/ }).first().click();
+  await expect.poll(() => onScreen(21), { timeout: 10_000 }).toBe(true);
+});

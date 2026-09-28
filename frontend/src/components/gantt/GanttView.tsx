@@ -7,11 +7,14 @@ import { Pencil } from "lucide-react";
 import { toast } from "sonner";
 import {
   ZOOM_PRESETS,
+  boxesOverlap,
   closestTaskId,
   dayAtOffset,
   durationLabel,
+  firstInPlanOrder,
   highlightDay,
   isDragEnd,
+  revealScroll,
   toSvarLinks,
   toSvarTasks,
   type ScaleCell,
@@ -22,6 +25,8 @@ import { RuLocale } from "./locale";
 import type { Operation, ScheduledPlan } from "@/api/types";
 import { formatRu, addDays, parseISODate, toISODate } from "@/lib/dates";
 import { loadLayoutPrefs, saveLayoutPrefs, savedGridWidth } from "@/lib/layoutPrefs";
+import { ruPlural } from "@/lib/resourceSummary";
+import type { RevealMode } from "@/hooks/useSessionEvents";
 
 const TASK_TYPES = [
   { id: "task", label: "Задача" },
@@ -130,6 +135,12 @@ export function GanttView(props: {
   dark?: boolean;
   onOpenTask(id: number): void;
   onApply(ops: Operation[]): Promise<void>;
+  // Tasks that just changed, to bring into view if none of them is on screen: `scroll` moves the
+  // chart to the topmost one, `notice` offers to (see revealMode). `key` makes each request new.
+  reveal?: { ids: number[]; mode: RevealMode; key: number } | null;
+  onRevealed?(): void;
+  // Highlight tasks the chart has just scrolled to (the app's own flash, held a little longer).
+  onFlash?(ids: number[]): void;
 }) {
   // Handlers passed into `init` are captured once (the Gantt is only initialized once);
   // routing through a ref keeps them current without re-running `init`.
@@ -392,12 +403,69 @@ export function GanttView(props: {
   // Unmounted mid-press (e.g. the plan was reset): don't leave the tooltip hidden app-wide.
   useEffect(() => () => document.body.classList.remove(BAR_PRESSED), []);
 
+  // A change to tasks that are all off screen (scrolled away, or below the rendered rows) used to
+  // happen unseen. Checked against the DOM once SVAR has drawn the new plan: a bar counts as on
+  // screen when part of it is inside the chart's visible area — horizontally the `.wx-chart`
+  // viewport, vertically the `.wx-gantt` one below the scale header.
+  const barOnScreen = useCallback((id: number): boolean => {
+    const root = containerRef.current;
+    const bar = root?.querySelector(`.wx-bar[data-id="${id}"]`);
+    const chart = root?.querySelector(".wx-chart");
+    const gantt = root?.querySelector(".wx-gantt");
+    if (!bar || !chart || !gantt) return false;
+    const x = chart.getBoundingClientRect();
+    const y = gantt.getBoundingClientRect();
+    const header = root?.querySelector(".wx-scale")?.getBoundingClientRect().bottom ?? y.top;
+    return boxesOverlap(bar.getBoundingClientRect(), { left: x.left, right: x.right, top: header, bottom: y.bottom });
+  }, []);
+  const scrollToTask = useCallback(
+    (id: number) => {
+      const task = api?.getTask(id) as { $x?: number; $y?: number } | undefined;
+      const chart = containerRef.current?.querySelector(".wx-chart");
+      const gantt = containerRef.current?.querySelector(".wx-gantt");
+      if (!api || task?.$x == null || task.$y == null || !chart || !gantt) return;
+      api.exec("scroll-chart", revealScroll({ x: task.$x, y: task.$y }, { width: chart.clientWidth, height: gantt.clientHeight }));
+    },
+    [api],
+  );
+  // Changed tasks offered by the notice («Изменено N задач вне видимой области · Показать»).
+  const [offscreen, setOffscreen] = useState<number[] | null>(null);
+  const showTasks = (ids: number[]) => {
+    const first = firstInPlanOrder(handlers.current.plan, ids);
+    if (first == null) return;
+    scrollToTask(first);
+    handlers.current.onFlash?.(ids);
+  };
+  const reveal = props.reveal;
+  useEffect(() => {
+    if (!reveal || !api) return;
+    // Two frames: React commits the new tasks, then SVAR lays the bars out.
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const present = reveal.ids.filter((id) => handlers.current.plan.tasks.some((t) => t.id === id));
+        if (present.length === 0 || present.some(barOnScreen)) setOffscreen(null);
+        else if (reveal.mode === "scroll") showTasks(present);
+        else setOffscreen(present);
+        handlers.current.onRevealed?.();
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+    // showTasks reads everything through refs/stable callbacks; the request itself is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal, api, barOnScreen]);
+  // The notice goes away by itself after a while, like a toast.
+  useEffect(() => {
+    if (!offscreen) return;
+    const timer = setTimeout(() => setOffscreen(null), 20_000);
+    return () => clearTimeout(timer);
+  }, [offscreen]);
+
   const ThemeWrapper = props.dark ? WillowDark : Willow;
 
   return (
     <div
       ref={containerRef}
-      className={`gantt-host h-full min-h-0${props.zoom === "day" ? " gantt-day-zoom" : ""}`}
+      className={`gantt-host relative h-full min-h-0${props.zoom === "day" ? " gantt-day-zoom" : ""}`}
       // Capture phase: SVAR's own drag handling must not be able to hide the press from us.
       onPointerDownCapture={(e) => {
         pointerDown.current = { x: e.clientX, y: e.clientY, type: e.pointerType, moved: false };
@@ -459,6 +527,34 @@ export function GanttView(props: {
           </TooltipPlan.Provider>
         </ThemeWrapper>
       </RuLocale>
+      {offscreen && (
+        <div
+          role="status"
+          className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-3 rounded-md border border-border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md"
+        >
+          <span>
+            Изменено {offscreen.length} {ruPlural(offscreen.length, "задача", "задачи", "задач")} вне видимой области
+          </span>
+          <button
+            type="button"
+            className="font-medium text-primary hover:underline"
+            onClick={() => {
+              showTasks(offscreen);
+              setOffscreen(null);
+            }}
+          >
+            Показать
+          </button>
+          <button
+            type="button"
+            aria-label="Скрыть"
+            className="text-muted-foreground hover:text-foreground"
+            onClick={() => setOffscreen(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }

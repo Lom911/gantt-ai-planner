@@ -1,4 +1,4 @@
-import { parsePlanChanged, reconnectDelay } from "./useSessionEvents";
+import { parsePlanChanged, parsePlanSource, reconnectDelay, revealMode } from "./useSessionEvents";
 
 test("parses changed_task_ids from the plan_changed payload", () => {
   expect(parsePlanChanged(JSON.stringify({ type: "plan_changed", version: 3, changed_task_ids: [1, 2] }))).toEqual([
@@ -41,4 +41,19 @@ test("reconnect delay backs off exponentially and is capped at a minute", () => 
   expect([0, 1, 2, 3, 4, 5, 6, 10].map(reconnectDelay)).toEqual([
     2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000,
   ]);
+});
+
+test("parsePlanSource reads who changed the plan, or null", () => {
+  expect(parsePlanSource(JSON.stringify({ type: "plan_changed", source: "mcp" }))).toBe("mcp");
+  expect(parsePlanSource(JSON.stringify({ type: "plan_changed" }))).toBeNull();
+  expect(parsePlanSource("not json")).toBeNull();
+});
+
+test("the chart scrolls to the agent's changes and to this tab's own, and only notifies about the rest", () => {
+  expect(revealMode("agent", false)).toBe("scroll"); // the chat asked for it, whichever tab
+  expect(revealMode("user", true)).toBe("scroll"); // this tab's undo, card, new task
+  expect(revealMode("user", false)).toBe("notice"); // another tab
+  expect(revealMode("mcp", false)).toBe("notice"); // an external client
+  expect(revealMode("mcp", true)).toBe("notice");
+  expect(revealMode(null, false)).toBe("notice");
 });

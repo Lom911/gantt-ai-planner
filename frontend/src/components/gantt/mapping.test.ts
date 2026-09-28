@@ -1,4 +1,15 @@
-import { closestTaskId, dayAtOffset, durationLabel, highlightDay, isDragEnd, toSvarLinks, toSvarTasks } from "./mapping";
+import {
+  boxesOverlap,
+  closestTaskId,
+  dayAtOffset,
+  durationLabel,
+  firstInPlanOrder,
+  highlightDay,
+  isDragEnd,
+  revealScroll,
+  toSvarLinks,
+  toSvarTasks,
+} from "./mapping";
 import type { ScheduledPlan } from "@/api/types";
 
 const plan: ScheduledPlan = {
@@ -146,5 +157,26 @@ describe("durationLabel", () => {
     expect(durationLabel("2026-09-21", "2026-09-23", 3)).toBe("3 рабочих дня");
     expect(durationLabel("2026-09-24", "2026-09-24", 1)).toBe("1 рабочий день");
     expect(durationLabel("2026-09-21", "2026-09-25", 5)).toBe("5 рабочих дней");
+  });
+});
+
+describe("revealing changed tasks off screen", () => {
+  const view = { left: 500, top: 150, right: 1200, bottom: 850 };
+  it("a bar counts as on screen when any part of it is inside the chart's viewport", () => {
+    expect(boxesOverlap({ left: 600, top: 300, right: 700, bottom: 330 }, view)).toBe(true);
+    expect(boxesOverlap({ left: 1150, top: 300, right: 1400, bottom: 330 }, view)).toBe(true); // cut by the right edge
+    expect(boxesOverlap({ left: 1300, top: 300, right: 1400, bottom: 330 }, view)).toBe(false); // further right
+    expect(boxesOverlap({ left: 600, top: 900, right: 700, bottom: 930 }, view)).toBe(false); // below
+    expect(boxesOverlap({ left: 600, top: 100, right: 700, bottom: 150 }, view)).toBe(false); // under the scale header
+  });
+  it("scrolls the task's row to a third of the way down and its bar just right of the left edge", () => {
+    expect(revealScroll({ x: 2000, y: 1200 }, { width: 700, height: 600 })).toEqual({ left: 2000 - 160, top: 1000 });
+    expect(revealScroll({ x: 50, y: 40 }, { width: 700, height: 600 })).toEqual({ left: 0, top: 0 });
+    expect(revealScroll({ x: 300, y: 300 }, { width: 400, height: 300 })).toEqual({ left: 200, top: 200 });
+  });
+  it("goes to the topmost changed task in the plan's row order", () => {
+    expect(firstInPlanOrder(plan, [2, 1])).toBe(1);
+    expect(firstInPlanOrder(plan, [2])).toBe(2);
+    expect(firstInPlanOrder(plan, [99])).toBeNull(); // deleted meanwhile
   });
 });
