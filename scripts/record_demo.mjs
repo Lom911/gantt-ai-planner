@@ -1,5 +1,7 @@
 // Records a short screen-capture demo of the main scenario: import an Excel plan, edit it via
-// the (fake-LLM) chat, inspect a task, and export. Drives a chromium instance with Playwright's
+// the chat, open a task's card, and export. Works against the fake LLM (local stack) and a live
+// model (DEMO_BASE_URL=https://gantt-ai-planner.duckdns.org): it waits for the agent's change
+// summaries, not for a particular reply text. The session it creates is deleted at the end. Drives a chromium instance with Playwright's
 // own `recordVideo` against an already-running full stack (see docs below), then converts the
 // captured .webm into docs/demo.mp4 (H.264) and docs/demo.gif.
 //
@@ -38,6 +40,8 @@ const SAMPLE_XLSX = path.join(ROOT, "examples", "sample-plan.xlsx");
 const DOCS_DIR = path.join(ROOT, "docs");
 const BASE_URL = process.env.DEMO_BASE_URL ?? "http://localhost:8000";
 const FFMPEG_IMAGE = "jrottenberg/ffmpeg:6.1-ubuntu";
+// How much of each wait for the model stays in the video.
+const KEEP_OF_WAIT_S = 2.5;
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,6 +65,18 @@ async function main() {
     recordVideo: { dir: videoDir, size: { width: 1440, height: 900 } },
   });
   const page = await context.newPage();
+  // The video starts with the page. A live model's turn takes up to a minute or more, so the wait
+  // is cut out of the video: `waitCut` keeps the first seconds of it (the agent's progress in the
+  // chat) and the moment before the result, and remembers the rest for ffmpeg to drop.
+  const videoStart = Date.now();
+  const cuts = [];
+  const waitCut = async (waiting) => {
+    const started = Date.now();
+    await waiting;
+    const from = (started - videoStart) / 1000 + KEEP_OF_WAIT_S;
+    const to = (Date.now() - videoStart) / 1000 - 0.5;
+    if (to - from > 1) cuts.push([from, to]);
+  };
 
   try {
     // 1. Open the app — demo plan visible, critical path highlighted in the legend.
@@ -79,14 +95,14 @@ async function main() {
     await expectGone(page, "Сбор требований и приоритизация");
     await pause(1800);
 
-    // 3. Chat edit #1: bulk move by assignee (fake LLM: "сдвинь все задачи <имя> на N дня").
+    // 3. Chat edit #1: bulk move by assignee.
     const chatBox = page.getByRole("textbox", { name: /сообщение/i });
     await chatBox.click();
     await chatBox.pressSequentially("Сдвинь все задачи Олега на 3 дня", { delay: 45 });
     await pause(400);
     await page.keyboard.press("Enter");
     const diffButton = page.getByText(/Изменено задач: \d+/).first();
-    await diffButton.waitFor({ state: "visible", timeout: 20_000 });
+    await waitCut(diffButton.waitFor({ state: "visible", timeout: 180_000 }));
     await pause(800);
     await diffButton.click(); // expand the DiffSummary list
     await pause(2000);
@@ -96,10 +112,15 @@ async function main() {
     await chatBox.pressSequentially("Назначь задачу 5 на Наталью Белову", { delay: 45 });
     await pause(400);
     await page.keyboard.press("Enter");
-    await page.getByText(/Готово/).last().waitFor({ state: "visible", timeout: 20_000 });
+    // Done when the second turn's own change summary shows up (the reply wording varies).
+    await waitCut(
+      page.waitForFunction(() => (document.body.innerText.match(/Изменено задач: \d+/g) ?? []).length >= 2, null, {
+        timeout: 180_000,
+      }),
+    );
     await pause(1800);
 
-    // 5. Open a task modal (click a bar), show dates/history, then close.
+    // 5. Open a task's card with a click on its bar (as the brief asks), then close it.
     // The task name renders at least twice (the grid's "Задача" cell, then the bar's own label)
     // plus once per changed field inside the now-expanded DiffSummary above (each change line is
     // its own clickable button, e.g. "№5 «Заказ грузового транспорта»: начало ..."). Those extra
@@ -123,8 +144,16 @@ async function main() {
     await page.getByRole("link", { name: "Экспорт" }).click();
     await downloadPromise;
     await pause(2500);
+  } catch (err) {
+    // A live model may answer differently (a question, an error): keep what the screen showed.
+    const shot = path.join(videoDir, "failure.png");
+    await page.screenshot({ path: shot }).catch(() => {});
+    console.error("demo failed; screenshot:", shot);
+    throw err;
   } finally {
     await page.close();
+    // Leave nothing behind on the server (the context still holds the session cookie).
+    await context.request.delete(`${BASE_URL}/api/session`, { headers: { Origin: new URL(BASE_URL).origin } }).catch(() => {});
     await context.close();
     await browser.close();
   }
@@ -149,10 +178,16 @@ async function main() {
   // empirically: blank until ~0.5s, loading text until ~1.3-1.5s). `-ss` placed *after* `-i` here
   // is output-side (decode-accurate, not keyframe-snapped) seeking, trimming the first 1.6s so
   // the mp4/gif both open directly on the rendered demo plan.
+  // The model's waits (see waitCut) are dropped here: frames inside them are skipped and the rest
+  // re-timed at a constant 25 fps (Playwright's webm has a variable frame rate).
+  const drop = cuts.map(([a, b]) => `between(t,${a.toFixed(2)},${b.toFixed(2)})`).join("+");
+  console.log("cut from the video (s):", cuts.map(([a, b]) => `${a.toFixed(1)}–${b.toFixed(1)}`).join(", ") || "nothing");
   runFfmpeg(videoDir, [
     "-y",
     "-i",
     webmName,
+    "-vf",
+    drop ? `fps=25,select='not(${drop})',setpts=N/25/TB` : "fps=25",
     "-ss",
     "1.6",
     "-c:v",
