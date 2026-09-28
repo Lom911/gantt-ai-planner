@@ -86,8 +86,9 @@ async function uiDiff(page: Page, p: PlanResp): Promise<{ bad: string[]; rows: n
   const bad: string[] = [];
   const caption = await page.getByText(/^Старт \d{2}\.\d{2}\.\d{4} · Окончание/).innerText();
   const span = Math.round((Date.parse(p.plan.project_end) - Date.parse(p.plan.project_start)) / 86_400_000) + 1;
-  const want = `Старт ${ru(p.plan.project_start)} · Окончание ${ru(p.plan.project_end)} (${span} `;
-  if (!caption.startsWith(want)) bad.push(`подпись «${caption}»≠«${want}…»`);
+  const work = workdaysInclusive(p.plan.project_start, p.plan.project_end);
+  const want = `Старт ${ru(p.plan.project_start)} · Окончание ${ru(p.plan.project_end)} (${work} рабоч`;
+  if (!caption.startsWith(want) || !caption.includes(`, всего ${span} `)) bad.push(`подпись «${caption}»≠«${want}…, всего ${span}…»`);
   // all grid rows: top of the list, then scrolled to the bottom (the grid is virtualized)
   const seen = new Map<number, Awaited<ReturnType<typeof gridRows>>[number]>();
   for (const r of await gridRows(page)) seen.set(r.id, r);
