@@ -14,6 +14,17 @@ async function drag(page: Page, handle: ReturnType<Page["locator"]>, dx: number)
   await page.mouse.up();
 }
 
+// Hovers until the bar's tooltip shows `text`. SVAR's tooltip appears 300 ms after a mousemove and
+// drops on any scroll event — including the one a scrollIntoViewIfNeeded() just before fires a
+// frame later — so a single move can leave it hidden for good; wiggle the pointer until it shows.
+async function hoverTooltip(page: Page, x: number, y: number, text: string | RegExp) {
+  await expect(async () => {
+    await page.mouse.move(x + 1, y);
+    await page.mouse.move(x, y);
+    await expect(page.getByRole("tooltip")).toContainText(text, { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
+}
+
 test("hand-adjusted layout survives a reload and can be reset", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/");
@@ -137,8 +148,7 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   await bar.scrollIntoViewIfNeeded();
   const box = (await bar.boundingBox())!;
   const y = box.y + box.height / 2;
-  await page.mouse.move(box.x + box.width / 2, y);
-  await expect(tooltip).toContainText(`${before} рабоч`);
+  await hoverTooltip(page, box.x + box.width / 2, y, `${before} рабоч`);
   const x = box.x + box.width - 3;
   await page.mouse.move(x, y);
   await page.mouse.down();
@@ -149,8 +159,7 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   await expect(row(14).locator(".wx-cell").nth(4)).toHaveText(String(before - 2));
   await expect(row(14)).toHaveClass(/wx-selected/);
   await expect(row(4)).not.toHaveClass(/wx-selected/);
-  await page.mouse.move(box.x + 10, y, { steps: 3 });
-  await expect(tooltip).toContainText(`${before - 2} рабоч`);
+  await hoverTooltip(page, box.x + 10, y, `${before - 2} рабоч`);
 
   // Moving a whole bar selects it too.
   await page.locator('.wx-bar[data-id="13"]').scrollIntoViewIfNeeded();
@@ -219,7 +228,7 @@ test("weekends are tinted and the tooltip tells calendar days from working days"
   const crossing = tasks.find((t) => days(t) > t.duration)!;
   const bar = page.locator(`.wx-bar[data-id="${crossing.id}"]`);
   await bar.scrollIntoViewIfNeeded();
-  await bar.hover();
-  await expect(page.getByRole("tooltip")).toContainText(`из них ${crossing.duration} рабоч`);
+  const b = (await bar.boundingBox())!;
+  await hoverTooltip(page, b.x + b.width / 2, b.y + b.height / 2, `из них ${crossing.duration} рабоч`);
   await expect(page.getByRole("tooltip")).toContainText(`${days(crossing)} д`);
 });
