@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
@@ -57,6 +57,12 @@ export function TaskModal({
   // «Удалить задачу» asks once more inline (the footer turns into a confirmation) before it sends
   // delete_task. Keyed by task id so it never carries over to another task's card.
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
+  // A click on the chart opens the card; the second click of a habitual double click lands on the
+  // backdrop a moment later and closed it again right away. Presses outside are ignored briefly.
+  const openedAt = useRef(0);
+  useEffect(() => {
+    if (open) openedAt.current = performance.now();
+  }, [open]);
 
   if (task) {
     if (!state || state.taskId !== task.id) {
@@ -145,7 +151,11 @@ export function TaskModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent
+        onPointerDownOutside={(e) => {
+          if (performance.now() - openedAt.current < 500) e.preventDefault();
+        }}
+      >
         <DialogTitle>
           №{task.id} «{task.name}»
         </DialogTitle>

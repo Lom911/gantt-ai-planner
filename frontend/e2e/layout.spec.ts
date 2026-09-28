@@ -96,9 +96,10 @@ test("a day column can be picked from the keyboard", async ({ page }) => {
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-// A single click on a task only selects it (its grid row is tinted); the card opens on a double
-// click — on the row or the bar — or from the pencil at the end of the row.
-test("a click selects a task, a double click or the pencil opens its card", async ({ page }) => {
+// A click on a task — its row or its bar — opens the card, as the brief asks, and tints the row as
+// selected; so does the pencil at the end of the row. A double click out of habit leaves the card
+// open (its second click must not land on the backdrop and close it).
+test("a click on a row or a bar opens its card and selects it", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/");
   await expect(page.locator(".wx-bar").first()).toBeVisible();
@@ -106,18 +107,23 @@ test("a click selects a task, a double click or the pencil opens its card", asyn
   const dialog = page.getByRole("dialog");
 
   await row.locator(".wx-col-text").click();
-  await expect(row).toHaveClass(/wx-selected/);
-  await expect(dialog).toHaveCount(0);
-  await page.locator('.wx-bar[data-id="6"]').click();
-  await expect(page.locator('.wx-table-container [data-id="6"]').first()).toHaveClass(/wx-selected/);
-  await expect(dialog).toHaveCount(0);
-
-  await row.locator(".wx-col-text").dblclick();
   await expect(dialog.getByRole("heading").first()).toHaveText(/^№4 /);
+  await expect(row).toHaveClass(/wx-selected/);
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
 
-  await page.locator('.wx-bar[data-id="6"]').dblclick();
+  await page.locator('.wx-bar[data-id="6"]').click();
+  await expect(dialog.getByRole("heading").first()).toHaveText(/^№6 /);
+  await expect(page.locator('.wx-table-container [data-id="6"]').first()).toHaveClass(/wx-selected/);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  // A person's double click: the card is already open when the second click comes (≈120 ms later).
+  const bar6 = (await page.locator('.wx-bar[data-id="6"]').boundingBox())!;
+  await page.mouse.click(bar6.x + bar6.width / 2, bar6.y + bar6.height / 2);
+  await page.waitForTimeout(120);
+  await page.mouse.click(bar6.x + bar6.width / 2, bar6.y + bar6.height / 2, { clickCount: 2 });
+  await page.waitForTimeout(500);
   await expect(dialog.getByRole("heading").first()).toHaveText(/^№6 /);
   await page.keyboard.press("Escape");
 
@@ -140,6 +146,8 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   };
 
   await row(4).locator(".wx-col-text").click();
+  await page.keyboard.press("Escape"); // the click opened №4's card; the row stays selected
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(row(4)).toHaveClass(/wx-selected/);
 
   // Shrink «Корзина и оформление заказа» (№14) by two day cells from its right edge.
@@ -183,6 +191,7 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   await page.mouse.up();
   await expect(row(14)).toHaveClass(/wx-selected/);
   await expect(row(14).locator(".wx-cell").nth(4)).toHaveText(String(before - 2));
+  await expect(page.getByRole("dialog")).toHaveCount(0); // a drag, even one brought back, isn't a click
 });
 
 test("the chat folds into a rail so the chart gets the whole width, and stays folded after a reload", async ({ page }) => {

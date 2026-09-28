@@ -51,9 +51,9 @@ export function isDragEnd(down: { x: number; y: number } | null, up: { x: number
 }
 
 // SVAR (@svar-ui/lib-dom `locate`) marks both grid rows and gantt bars with a `data-id`
-// attribute holding the task id. We use it to open the task modal from a genuine pointer
-// double click or the grid's pencil button (bubbling up from the row/bar to our own
-// container), instead of SVAR's API events (`select-task` also fires on keyboard navigation).
+// attribute holding the task id. We use it to open the task modal from a genuine pointer click
+// (bubbling up from the row/bar to our own container), instead of SVAR's API events
+// (`select-task` also fires on keyboard navigation).
 export function closestTaskId(target: EventTarget | null): number | null {
   if (!(target instanceof Element)) return null;
   // A click on a bar's link connector (`.wx-link`, the little dot at each end used to draw a

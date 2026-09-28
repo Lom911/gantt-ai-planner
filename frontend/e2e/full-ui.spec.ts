@@ -142,7 +142,7 @@ async function mutate(page: Page, timeoutOrAction: number | (() => Promise<void>
   return plan(page);
 }
 async function openTask(page: Page, id: number) {
-  await page.locator(`.wx-table-container [data-id="${id}"] .wx-col-text`).first().dblclick();
+  await page.locator(`.wx-table-container [data-id="${id}"] .wx-col-text`).first().click();
   await expect(page.getByRole("dialog")).toBeVisible();
   return page.getByRole("dialog");
 }

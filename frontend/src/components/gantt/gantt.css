@@ -46,7 +46,7 @@
   --wx-font-family: system-ui, "Segoe UI", sans-serif;
 }
 
-/* A single click on a row or bar selects the task (a double click opens it). Willow's own
+/* A click on a row or bar opens the task's card and selects its row. Willow's own
    selection tint (#eaedf5, barely off the white rows) read as "nothing happened", so it's the
    same blue family as the picked-day column instead, plus an accent on the row's left edge. */
 .wx-theme.wx-willow-theme {

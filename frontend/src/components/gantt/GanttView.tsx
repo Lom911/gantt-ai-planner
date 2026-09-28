@@ -92,9 +92,9 @@ function hideTooltipWhilePressed() {
   window.addEventListener("pointercancel", release, { signal: pressed.signal });
 }
 
-// The grid's last column: an explicit way into the task modal, since a single click on a row only
-// selects it (a double click opens the modal too). The button sits inside the row's `[data-id]`
-// element, so the container's onClick resolves the task with closestTaskId like any other click.
+// The grid's last column: a visible hint that a row opens its card (any click on a row or bar does,
+// see the container's onClick). The button sits inside the row's `[data-id]` element, so the
+// container resolves the task with closestTaskId like any other click.
 // (`row` is SVAR's grid IRow, `{[key: string]: any}` — our SvarTask at runtime.)
 function EditCell({ row }: { row: { [key: string]: unknown } }) {
   return (
@@ -233,11 +233,12 @@ export function GanttView(props: {
       saveLayoutPrefs({ columns: widths });
     });
 
-    // A single click on a row or bar only selects the task (SVAR's own `select-task`, which
-    // tints the row); the modal opens on a double click or the grid's pencil button — both
-    // handled by the container below. SVAR's own double-click `show-editor` is blocked: it would
-    // open SVAR's built-in editor, and it doesn't fire at all while the chart is read-only
-    // (agent busy), when the modal should still open to view the task.
+    // A click on a row or bar opens the task's card, as the brief asks («по клику на задачу
+    // открывается модалка»), and SVAR's own `select-task` tints the row at the same time; both are
+    // handled by the container below, not by SVAR's events (`select-task` also fires on keyboard
+    // navigation). SVAR's double-click `show-editor` is blocked: it would open SVAR's built-in
+    // editor, and it doesn't fire at all while the chart is read-only (agent busy), when the card
+    // should still open to view the task.
     api.intercept("show-editor", () => false);
 
     // A bar drag or resize is committed as an `update-task` event carrying either `diff` (the
@@ -385,8 +386,9 @@ export function GanttView(props: {
     };
   }, [api, zoom, selectedDay, dayOfCell]);
 
-  // Where the last press started, to tell a click from the end of a bar drag (see isDragEnd).
-  const pointerDown = useRef<{ x: number; y: number } | null>(null);
+  // Where the last press started and whether the pointer has since moved away, to tell a click
+  // from the end of a bar drag (see isDragEnd) — including a drag brought back to where it began.
+  const pointerDown = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   // Unmounted mid-press (e.g. the plan was reset): don't leave the tooltip hidden app-wide.
   useEffect(() => () => document.body.classList.remove(BAR_PRESSED), []);
 
@@ -398,26 +400,24 @@ export function GanttView(props: {
       className={`gantt-host h-full min-h-0${props.zoom === "day" ? " gantt-day-zoom" : ""}`}
       // Capture phase: SVAR's own drag handling must not be able to hide the press from us.
       onPointerDownCapture={(e) => {
-        pointerDown.current = { x: e.clientX, y: e.clientY };
+        pointerDown.current = { x: e.clientX, y: e.clientY, moved: false };
         if (e.button === 0 && e.target instanceof Element && e.target.closest(".wx-bar")) {
           hideTooltipWhilePressed();
         }
       }}
+      onPointerMoveCapture={(e) => {
+        const press = pointerDown.current;
+        if (press && !press.moved && isDragEnd(press, { x: e.clientX, y: e.clientY })) press.moved = true;
+      }}
       onClick={(e) => {
-        if (isDragEnd(pointerDown.current, { x: e.clientX, y: e.clientY })) return;
+        const press = pointerDown.current;
+        if (press?.moved || isDragEnd(press, { x: e.clientX, y: e.clientY })) return;
         // The bottom scale row holds the day numbers (in day zoom): a click there picks that column.
         const dayCell = e.target instanceof Element ? e.target.closest(DAY_CELL) : null;
         if (dayCell) {
           toggleDayAt(dayCell);
           return;
         }
-        if (e.target instanceof Element && e.target.closest(".gantt-edit-task")) {
-          const id = closestTaskId(e.target);
-          if (id != null) handlers.current.onOpenTask(id);
-        }
-      }}
-      onDoubleClick={(e) => {
-        if (isDragEnd(pointerDown.current, { x: e.clientX, y: e.clientY })) return;
         const id = closestTaskId(e.target);
         if (id != null) handlers.current.onOpenTask(id);
       }}
