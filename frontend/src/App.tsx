@@ -121,6 +121,7 @@ function App() {
             right={
               <ChatPanel onFocusTask={(id) => flashFocused([id])} agentBusy={agentBusy} />
             }
+            chatBusy={agentBusy}
           />
         )}
       </main>

@@ -5,14 +5,26 @@ beforeEach(() => localStorage.clear());
 test("saved layout survives a reload (merged per field)", () => {
   saveLayoutPrefs({ splitRatio: 0.78 });
   saveLayoutPrefs({ gridWidth: 360, columns: { text: 150, assignee: 110 } });
-  saveLayoutPrefs({ zoom: "week" });
-  expect(loadLayoutPrefs()).toEqual({ splitRatio: 0.78, gridWidth: 360, columns: { text: 150, assignee: 110 }, zoom: "week" });
+  saveLayoutPrefs({ zoom: "week", chatCollapsed: true });
+  expect(loadLayoutPrefs()).toEqual({
+    splitRatio: 0.78,
+    gridWidth: 360,
+    columns: { text: 150, assignee: 110 },
+    zoom: "week",
+    chatCollapsed: true,
+  });
 });
 
 test("out-of-range or foreign values are dropped, not applied", () => {
   localStorage.setItem(
     "gantt-ai-planner:layout:v1",
-    JSON.stringify({ splitRatio: 5, gridWidth: -1, columns: { text: 9999, id: 44, evil: "x" }, zoom: "year" }),
+    JSON.stringify({
+      splitRatio: 5,
+      gridWidth: -1,
+      columns: { text: 9999, id: 44, evil: "x" },
+      zoom: "year",
+      chatCollapsed: "yes",
+    }),
   );
   expect(loadLayoutPrefs()).toEqual({ columns: { id: 44 } });
 });

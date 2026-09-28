@@ -19,6 +19,7 @@ function setWidth(width: number) {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
 }
 
+beforeEach(() => localStorage.clear());
 afterEach(() => setWidth(1024));
 
 test("on a phone, switching tabs hides the inactive pane instead of unmounting it", () => {
@@ -54,4 +55,49 @@ test("crossing the mobile breakpoint keeps both panes mounted", () => {
   });
   expect(screen.getByText("chat content")).toBeVisible();
   expect(log).toEqual(["mount chart", "mount chat"]);
+});
+
+test("by default the chat gets a fixed width and the chart takes the rest", () => {
+  render(<SplitLayout left={<div>chart content</div>} right={<div>chat content</div>} />);
+  expect(screen.getByText("chart content").parentElement).toHaveStyle({ width: "calc(100% - 380px)" });
+});
+
+test("on a desktop the chat collapses to a rail and comes back without remounting", () => {
+  const log: string[] = [];
+  render(<SplitLayout left={<Probe name="chart" log={log} />} right={<Probe name="chat" log={log} />} />);
+  fireEvent.click(screen.getByRole("button", { name: "Свернуть чат" }));
+  expect(screen.getByText("chat content")).not.toBeVisible();
+  expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+  expect(screen.getByText("chart content").parentElement).not.toHaveStyle({ width: "calc(100% - 380px)" });
+
+  fireEvent.click(screen.getByRole("button", { name: "Развернуть чат" }));
+  expect(screen.getByText("chat content")).toBeVisible();
+  expect(screen.getByRole("separator")).toBeInTheDocument();
+  expect(log).toEqual(["mount chart", "mount chat"]);
+});
+
+test("a collapsed chat stays collapsed after a reload", () => {
+  const { unmount } = render(<SplitLayout left={<div>chart content</div>} right={<div>chat content</div>} />);
+  fireEvent.click(screen.getByRole("button", { name: "Свернуть чат" }));
+  unmount();
+  render(<SplitLayout left={<div>chart content</div>} right={<div>chat content</div>} />);
+  expect(screen.getByText("chat content")).not.toBeVisible();
+  expect(screen.getByRole("button", { name: "Развернуть чат" })).toBeInTheDocument();
+});
+
+test("the collapsed rail shows when the agent is working", () => {
+  const { rerender } = render(<SplitLayout left={<div>chart</div>} right={<div>chat</div>} />);
+  fireEvent.click(screen.getByRole("button", { name: "Свернуть чат" }));
+  expect(screen.queryByTitle("Агент работает")).not.toBeInTheDocument();
+  rerender(<SplitLayout left={<div>chart</div>} right={<div>chat</div>} chatBusy />);
+  expect(screen.getByTitle("Агент работает")).toBeInTheDocument();
+});
+
+test("on a phone a saved collapse is ignored: the chat tab still opens the chat", () => {
+  localStorage.setItem("gantt-ai-planner:layout:v1", JSON.stringify({ chatCollapsed: true }));
+  setWidth(390);
+  render(<SplitLayout left={<div>chart content</div>} right={<div>chat content</div>} />);
+  expect(screen.queryByRole("button", { name: "Развернуть чат" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Чат" }));
+  expect(screen.getByText("chat content")).toBeVisible();
 });

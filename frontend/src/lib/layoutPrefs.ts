@@ -1,7 +1,7 @@
 import type { Zoom } from "@/components/gantt/mapping";
 
-// Per-browser layout the user adjusted by hand — chart/chat split, the grid/timeline divider,
-// grid column widths, zoom — kept in localStorage so a reload or tomorrow's visit opens the same
+// Per-browser layout the user adjusted by hand — chart/chat split, a collapsed chat, the
+// grid/timeline divider, grid column widths, zoom — kept in localStorage so a reload or tomorrow's visit opens the same
 // way. It's a convenience only: every read/write is guarded (private mode, blocked storage,
 // quota) and anything missing, corrupt or out of range falls back to the defaults.
 export interface LayoutPrefs {
@@ -9,6 +9,7 @@ export interface LayoutPrefs {
   gridWidth?: number; // px, grid (table) part of the chart
   columns?: Record<string, number>; // px per grid column id
   zoom?: Zoom;
+  chatCollapsed?: boolean; // chat pane folded into a rail so the chart gets the whole width
 }
 
 const KEY = "gantt-ai-planner:layout:v1";
@@ -33,6 +34,7 @@ function sanitize(raw: unknown): LayoutPrefs {
     if (Object.keys(cols).length > 0) out.columns = cols;
   }
   if (typeof r.zoom === "string" && ZOOMS.has(r.zoom as Zoom)) out.zoom = r.zoom as Zoom;
+  if (typeof r.chatCollapsed === "boolean") out.chatCollapsed = r.chatCollapsed;
   return out;
 }
 
