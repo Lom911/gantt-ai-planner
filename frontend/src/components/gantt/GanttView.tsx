@@ -9,6 +9,7 @@ import {
   ZOOM_PRESETS,
   closestTaskId,
   dayAtOffset,
+  durationLabel,
   highlightDay,
   isDragEnd,
   toSvarLinks,
@@ -62,7 +63,7 @@ function BarTooltip({ data }: { api: IApi; data: Record<string, unknown> }) {
     <div className="max-w-64 rounded-md border border-border bg-popover px-2.5 py-2 text-xs text-popover-foreground shadow-md">
       <div className="font-medium">{task.name}</div>
       <div className="text-muted-foreground">
-        {formatRu(task.start)}–{formatRu(task.end)} · {task.duration} раб.дн.
+        {formatRu(task.start)}–{formatRu(task.end)} · {durationLabel(task.start, task.end, task.duration)}
       </div>
       {task.assignee && <div className="text-muted-foreground">{task.assignee}</div>}
       <div className="text-muted-foreground">Резерв {task.slack} дн.</div>

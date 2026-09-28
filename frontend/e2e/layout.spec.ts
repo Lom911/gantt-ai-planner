@@ -138,7 +138,7 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   const box = (await bar.boundingBox())!;
   const y = box.y + box.height / 2;
   await page.mouse.move(box.x + box.width / 2, y);
-  await expect(tooltip).toContainText(`${before} раб.дн.`);
+  await expect(tooltip).toContainText(`${before} рабоч`);
   const x = box.x + box.width - 3;
   await page.mouse.move(x, y);
   await page.mouse.down();
@@ -150,7 +150,7 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   await expect(row(14)).toHaveClass(/wx-selected/);
   await expect(row(4)).not.toHaveClass(/wx-selected/);
   await page.mouse.move(box.x + 10, y, { steps: 3 });
-  await expect(tooltip).toContainText(`${before - 2} раб.дн.`);
+  await expect(tooltip).toContainText(`${before - 2} рабоч`);
 
   // Moving a whole bar selects it too.
   await page.locator('.wx-bar[data-id="13"]').scrollIntoViewIfNeeded();
@@ -202,4 +202,24 @@ test("the chat folds into a rail so the chart gets the whole width, and stays fo
   await expect(input).toBeVisible();
   await expect(page.getByText(/Изменено задач: \d+/).first()).toBeVisible();
   expect(Math.abs(1600 - (await chartPane(page).boundingBox())!.width - chatWidth)).toBeLessThanOrEqual(3);
+});
+
+// A bar spans weekends but its duration counts working days only: Saturdays and Sundays are tinted
+// (scale and chart body), and the tooltip names both numbers — «Push-уведомления» (№15) is 5
+// working days over 7 calendar days in the demo plan whenever it crosses a weekend.
+test("weekends are tinted and the tooltip tells calendar days from working days", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".wx-bar").first()).toBeVisible();
+  await expect(page.locator(".wx-scale .gantt-weekend").first()).toBeVisible();
+  expect(await page.locator(".wx-gantt-holidays > .gantt-weekend").count()).toBeGreaterThan(1);
+  const body = await (await page.request.get("/api/plan")).json();
+  const tasks = body.plan.tasks as { id: number; start: string; end: string; duration: number }[];
+  const days = (t: { start: string; end: string }) => (Date.parse(t.end) - Date.parse(t.start)) / 86_400_000 + 1;
+  const crossing = tasks.find((t) => days(t) > t.duration)!;
+  const bar = page.locator(`.wx-bar[data-id="${crossing.id}"]`);
+  await bar.scrollIntoViewIfNeeded();
+  await bar.hover();
+  await expect(page.getByRole("tooltip")).toContainText(`из них ${crossing.duration} рабоч`);
+  await expect(page.getByRole("tooltip")).toContainText(`${days(crossing)} д`);
 });

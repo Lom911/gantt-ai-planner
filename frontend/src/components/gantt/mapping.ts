@@ -1,5 +1,6 @@
 import type { ScheduledPlan } from "@/api/types";
-import { addDays, parseISODate, toISODate } from "@/lib/dates";
+import { addDays, calendarDaysInclusive, parseISODate, toISODate } from "@/lib/dates";
+import { ruPlural } from "@/lib/resourceSummary";
 import type { IScaleConfig } from "@svar-ui/react-gantt";
 
 export type Zoom = "day" | "week" | "month";
@@ -99,7 +100,10 @@ export const ZOOM_PRESETS: Record<Zoom, { scales: IScaleConfig[]; cellWidth: num
 // column to mark. "gantt-project-start" draws the line the whole schedule is counted from: tasks
 // without predecessors start on the project start date. (SVAR's own `markers` would label it,
 // but the MIT build's store resets them — a PRO feature.) "gantt-selected-day" is the column the
-// user picked by clicking its date in the scale header (see dayAtOffset).
+// user picked by clicking its date in the scale header (see dayAtOffset). "gantt-weekend" tints
+// Saturdays and Sundays: a bar spans them, but a duration counts only working days (the backend's
+// calendar is Mon-Fri with no holidays, backend/app/domain/calendar.py), so without the tint a
+// 5-working-day task over a weekend looked 2 days too long.
 export function highlightDay(
   d: Date,
   unit: string,
@@ -113,7 +117,16 @@ export function highlightDay(
   if (d.toDateString() === today.toDateString()) classes.push("gantt-today");
   if (iso === projectStart) classes.push("gantt-project-start");
   if (iso === selectedDay) classes.push("gantt-selected-day");
+  if (d.getDay() === 0 || d.getDay() === 6) classes.push("gantt-weekend");
   return classes.join(" ");
+}
+
+// A bar's length in words (its tooltip): the calendar days it spans and how many of them are
+// working days — the duration everything else (the grid's «Дн.», the task card) shows.
+export function durationLabel(start: string, end: string, workDays: number): string {
+  const days = calendarDaysInclusive(parseISODate(start), parseISODate(end));
+  if (days === workDays) return `${workDays} ${ruPlural(workDays, "рабочий день", "рабочих дня", "рабочих дней")}`;
+  return `${days} ${ruPlural(days, "день", "дня", "дней")}, из них ${workDays} ${ruPlural(workDays, "рабочий", "рабочих", "рабочих")}`;
 }
 
 // SVAR's scale header cells carry no date attribute, so a click on one is mapped back to a day

@@ -26,8 +26,8 @@ const ITEMS = [
   },
 ];
 
-// The green swatch matches the start line drawn on the timeline, the tinted one the today column;
-// the dates themselves are in the caption above the chart.
+// The green swatch matches the start line drawn on the timeline, the tinted ones the today and
+// weekend columns; the dates themselves are in the caption above the chart.
 export function GanttLegend() {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
@@ -54,6 +54,17 @@ export function GanttLegend() {
           aria-hidden="true"
         />
         Сегодня
+      </span>
+      <span
+        title="Суббота и воскресенье. Полоса задачи их перекрывает, но в длительность (рабочие дни) они не входят: задача на 5 рабочих дней через выходные занимает 7 клеток."
+        className="inline-flex cursor-help items-center gap-1.5"
+      >
+        <span
+          className="h-3 w-2.5 rounded-sm border border-border"
+          style={{ background: "var(--gantt-weekend)" }}
+          aria-hidden="true"
+        />
+        Выходные
       </span>
     </div>
   );

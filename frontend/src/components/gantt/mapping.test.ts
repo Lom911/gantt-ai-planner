@@ -1,4 +1,4 @@
-import { closestTaskId, dayAtOffset, highlightDay, isDragEnd, toSvarLinks, toSvarTasks } from "./mapping";
+import { closestTaskId, dayAtOffset, durationLabel, highlightDay, isDragEnd, toSvarLinks, toSvarTasks } from "./mapping";
 import type { ScheduledPlan } from "@/api/types";
 
 const plan: ScheduledPlan = {
@@ -67,9 +67,15 @@ describe("highlightDay", () => {
   const today = new Date(2026, 8, 26);
   it("marks the project start and today in the day scale", () => {
     expect(highlightDay(new Date(2026, 8, 7), "day", "2026-09-07", today)).toBe("gantt-project-start");
-    expect(highlightDay(new Date(2026, 8, 26), "day", "2026-09-07", today)).toBe("gantt-today");
-    expect(highlightDay(new Date(2026, 8, 26), "day", "2026-09-26", today)).toBe("gantt-today gantt-project-start");
+    expect(highlightDay(new Date(2026, 8, 26), "day", "2026-09-07", today)).toBe("gantt-today gantt-weekend");
+    expect(highlightDay(new Date(2026, 8, 26), "day", "2026-09-26", today)).toBe("gantt-today gantt-project-start gantt-weekend");
     expect(highlightDay(new Date(2026, 8, 8), "day", "2026-09-07", today)).toBe("");
+  });
+  it("marks Saturdays and Sundays: they're in a bar's length but not in its working days", () => {
+    expect(highlightDay(new Date(2026, 9, 3), "day", "2026-09-07", today)).toBe("gantt-weekend");
+    expect(highlightDay(new Date(2026, 9, 4), "day", "2026-09-07", today)).toBe("gantt-weekend");
+    expect(highlightDay(new Date(2026, 9, 5), "day", "2026-09-07", today)).toBe("");
+    expect(highlightDay(new Date(2026, 9, 3), "week", "2026-09-07", today)).toBe("");
   });
   it("marks nothing in coarser scales (a week/month cell isn't one day)", () => {
     expect(highlightDay(new Date(2026, 8, 7), "week", "2026-09-07", today)).toBe("");
@@ -78,7 +84,7 @@ describe("highlightDay", () => {
   it("marks the day the user picked in the scale header, alongside today", () => {
     expect(highlightDay(new Date(2026, 8, 15), "day", "2026-09-07", today, "2026-09-15")).toBe("gantt-selected-day");
     expect(highlightDay(new Date(2026, 8, 26), "day", "2026-09-07", today, "2026-09-26")).toBe(
-      "gantt-today gantt-selected-day",
+      "gantt-today gantt-selected-day gantt-weekend",
     );
     expect(highlightDay(new Date(2026, 8, 16), "day", "2026-09-07", today, "2026-09-15")).toBe("");
   });
@@ -107,4 +113,18 @@ test("a click that ends a bar drag doesn't count as a click on the task", () => 
   expect(isDragEnd({ x: 100, y: 50 }, { x: 177, y: 50 })).toBe(true); // dragged 2 days
   expect(isDragEnd({ x: 100, y: 50 }, { x: 102, y: 51 })).toBe(false); // hand jitter on a click
   expect(isDragEnd(null, { x: 5, y: 5 })).toBe(false); // no pointerdown seen (keyboard)
+});
+
+describe("durationLabel", () => {
+  it("says how many of a bar's calendar days are working days", () => {
+    // Thu 01.10 – Wed 07.10: seven days on the chart, the weekend in the middle doesn't count.
+    expect(durationLabel("2026-10-01", "2026-10-07", 5)).toBe("7 дней, из них 5 рабочих");
+    expect(durationLabel("2026-09-25", "2026-09-28", 2)).toBe("4 дня, из них 2 рабочих");
+    expect(durationLabel("2026-09-21", "2026-10-11", 15)).toBe("21 день, из них 15 рабочих");
+  });
+  it("names just the working days when the bar has no weekend in it", () => {
+    expect(durationLabel("2026-09-21", "2026-09-23", 3)).toBe("3 рабочих дня");
+    expect(durationLabel("2026-09-24", "2026-09-24", 1)).toBe("1 рабочий день");
+    expect(durationLabel("2026-09-21", "2026-09-25", 5)).toBe("5 рабочих дней");
+  });
 });
