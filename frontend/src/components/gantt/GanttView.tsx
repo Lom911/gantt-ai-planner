@@ -79,9 +79,13 @@ function hideTooltipWhilePressed() {
   const host = document.body;
   host.classList.add(BAR_PRESSED);
   const pressed = new AbortController();
-  const release = () => {
+  const show = () => host.classList.remove(BAR_PRESSED);
+  const release = (e: PointerEvent) => {
     pressed.abort();
-    window.addEventListener("pointermove", () => host.classList.remove(BAR_PRESSED), { once: true });
+    // A touch or pen release may be followed by no pointermove at all (and SVAR shows no tooltip
+    // for touch anyway), so only a mouse waits for one.
+    if (e.pointerType === "mouse") window.addEventListener("pointermove", show, { once: true });
+    else show();
   };
   window.addEventListener("pointerup", release, { signal: pressed.signal });
   window.addEventListener("pointercancel", release, { signal: pressed.signal });
@@ -382,6 +386,8 @@ export function GanttView(props: {
 
   // Where the last press started, to tell a click from the end of a bar drag (see isDragEnd).
   const pointerDown = useRef<{ x: number; y: number } | null>(null);
+  // Unmounted mid-press (e.g. the plan was reset): don't leave the tooltip hidden app-wide.
+  useEffect(() => () => document.body.classList.remove(BAR_PRESSED), []);
 
   const ThemeWrapper = props.dark ? WillowDark : Willow;
 
