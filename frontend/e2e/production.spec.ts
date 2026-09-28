@@ -113,7 +113,7 @@ test("project start is marked on the timeline and in the legend", async ({ page 
   const bar = (await firstBar.boundingBox())!;
   expect(line.height).toBeGreaterThan(100);
   expect(Math.abs(line.x - bar.x)).toBeLessThanOrEqual(2);
-  const legend = page.getByText(/^Старт \d{2}\.\d{2}\.\d{4} · Окончание \d{2}\.\d{2}\.\d{4}$/);
+  const legend = page.getByText(/^Старт \d{2}\.\d{2}\.\d{4} · Окончание \d{2}\.\d{2}\.\d{4} \(\d+ (день|дня|дней)\)$/);
   await expect(legend).toBeVisible();
   // The grid's «Начало» column shows the first task (no predecessors) starting on that date.
   const [, dd, mm] = /^Старт (\d{2})\.(\d{2})/.exec(await legend.innerText())!;
@@ -198,6 +198,18 @@ test.describe("phone (390px)", () => {
     );
     expect(visibleBars).toBeGreaterThan(0);
     expect(await csp.violations()).toEqual([]);
+  });
+
+  test("a tap on a date picks its column, a tap on a row's pencil opens the card", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.locator(".wx-bar").first()).toBeVisible();
+    const day = page.locator(".wx-scale > .wx-row:last-child > .wx-cell").nth(2);
+    await day.tap();
+    await expect(day).toHaveClass(/gantt-selected-day/);
+    const pencil = page.locator(".gantt-edit-task").first();
+    expect((await pencil.boundingBox())!.width).toBeGreaterThanOrEqual(24); // a finger-sized target
+    await pencil.tap();
+    await expect(page.getByRole("dialog")).toBeVisible();
   });
 
   test("switching tabs keeps the chat mounted (a running turn is not aborted)", async ({ page }) => {

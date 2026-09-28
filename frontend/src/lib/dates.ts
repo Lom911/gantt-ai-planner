@@ -42,3 +42,8 @@ export function workdaysBetweenInclusive(start: Date, end: Date): number {
   }
   return count;
 }
+// Counts every calendar day (weekends included) between `start` and `end`, both inclusive.
+// Math.round absorbs the 23h/25h days around DST switches.
+export function calendarDaysInclusive(start: Date, end: Date): number {
+  return Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1;
+}

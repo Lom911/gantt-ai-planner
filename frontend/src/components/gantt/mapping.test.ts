@@ -1,4 +1,4 @@
-import { closestTaskId, highlightDay, isDragEnd, toSvarLinks, toSvarTasks } from "./mapping";
+import { closestTaskId, dayAtOffset, highlightDay, isDragEnd, toSvarLinks, toSvarTasks } from "./mapping";
 import type { ScheduledPlan } from "@/api/types";
 
 const plan: ScheduledPlan = {
@@ -73,6 +73,33 @@ describe("highlightDay", () => {
   });
   it("marks nothing in coarser scales (a week/month cell isn't one day)", () => {
     expect(highlightDay(new Date(2026, 8, 7), "week", "2026-09-07", today)).toBe("");
+    expect(highlightDay(new Date(2026, 8, 7), "week", "2026-09-01", today, "2026-09-07")).toBe("");
+  });
+  it("marks the day the user picked in the scale header, alongside today", () => {
+    expect(highlightDay(new Date(2026, 8, 15), "day", "2026-09-07", today, "2026-09-15")).toBe("gantt-selected-day");
+    expect(highlightDay(new Date(2026, 8, 26), "day", "2026-09-07", today, "2026-09-26")).toBe(
+      "gantt-today gantt-selected-day",
+    );
+    expect(highlightDay(new Date(2026, 8, 16), "day", "2026-09-07", today, "2026-09-15")).toBe("");
+  });
+});
+
+describe("dayAtOffset", () => {
+  const cells = [
+    { date: new Date(2026, 8, 7), width: 38, unit: "day" },
+    { date: new Date(2026, 8, 8), width: 38, unit: "day" },
+    { date: new Date(2026, 8, 9), width: 38, unit: "day" },
+  ];
+  it("finds the day cell under an x offset from the scale's left edge", () => {
+    expect(dayAtOffset(cells, 0)).toBe("2026-09-07");
+    expect(dayAtOffset(cells, 37.9)).toBe("2026-09-07");
+    expect(dayAtOffset(cells, 38)).toBe("2026-09-08");
+    expect(dayAtOffset(cells, 95)).toBe("2026-09-09");
+  });
+  it("returns null outside the scale or on a coarser scale", () => {
+    expect(dayAtOffset(cells, -1)).toBeNull();
+    expect(dayAtOffset(cells, 114)).toBeNull();
+    expect(dayAtOffset([{ date: new Date(2026, 8, 7), width: 100, unit: "week" }], 10)).toBeNull();
   });
 });
 

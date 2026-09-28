@@ -53,7 +53,7 @@ test("edge cases", async ({ browser }: { browser: Browser }, testInfo) => {
   await page.waitForTimeout(700);
   const tip = await page.locator(".wx-tooltip, [role=tooltip]").first().innerText().catch(() => "(нет подсказки)");
   check("XSS: подсказка при наведении — текст", !tip.includes("undefined") && (tip.includes("<img") || tip === "(нет подсказки)"), tip.slice(0, 80));
-  await page.locator('.wx-table-container [data-id="1"] .wx-col-text').first().click();
+  await page.locator('.wx-table-container [data-id="1"] .wx-col-text').first().dblclick();
   const dlgTitle = await page.getByRole("dialog").getByRole("heading").first().innerText();
   check("XSS: заголовок карточки — текст", dlgTitle.includes("<img src=x"), dlgTitle);
   await page.keyboard.press("Escape");
@@ -79,7 +79,7 @@ test("edge cases", async ({ browser }: { browser: Browser }, testInfo) => {
   await expect.poll(async () => (await plan(page)).plan.tasks.length).toBe(25);
   await page.waitForTimeout(800);
   const open4 = async () => {
-    await page.locator('.wx-table-container [data-id="4"] .wx-col-text').first().click();
+    await page.locator('.wx-table-container [data-id="4"] .wx-col-text').first().dblclick();
     return page.getByRole("dialog");
   };
   const vB = (await plan(page)).version;
@@ -116,13 +116,13 @@ test("edge cases", async ({ browser }: { browser: Browser }, testInfo) => {
   await pageB.goto("/");
   await expect(pageB.locator(".wx-bar").first()).toBeVisible();
   const before = (await plan(page)).plan.tasks.find((t: { id: number }) => t.id === 5);
-  await page.locator('.wx-table-container [data-id="5"] .wx-col-text').first().click();
+  await page.locator('.wx-table-container [data-id="5"] .wx-col-text').first().dblclick();
   await page.getByRole("dialog").getByLabel("Длительность, дн.").fill(String(before.duration + 1));
   await page.getByRole("dialog").getByRole("button", { name: "Сохранить" }).click();
   await expect(pageB.locator('.wx-table-container [data-id="5"] .wx-col-workDays').first()).toHaveText(String(before.duration + 1), { timeout: 10_000 });
   check("Две вкладки: правка в A видна в B без перезагрузки", true);
   // B opens the modal, A changes the same plan, B saves with a stale version
-  await pageB.locator('.wx-table-container [data-id="6"] .wx-col-text').first().click();
+  await pageB.locator('.wx-table-container [data-id="6"] .wx-col-text').first().dblclick();
   await pageB.getByRole("dialog").getByLabel("Описание").fill("из вкладки B");
   await page.request.post("/api/plan/operations", { data: { ops: [{ op: "update_task", id: 6, name: "Переименовано в A" }] }, headers: { Origin: ORIGIN } });
   await page.waitForTimeout(1500);
@@ -172,7 +172,7 @@ test("edge cases", async ({ browser }: { browser: Browser }, testInfo) => {
   const r500 = await page.locator('.wx-table-container [data-id="500"] .wx-col-startLabel').first().innerText();
   check("500 задач: «Начало» последней задачи = сервер", r500 === ddmm(big.plan.tasks.find((t: { id: number }) => t.id === 500).start), r500);
   const tEdit = Date.now();
-  await page.locator('.wx-table-container [data-id="500"] .wx-col-text').first().click();
+  await page.locator('.wx-table-container [data-id="500"] .wx-col-text').first().dblclick();
   await page.getByRole("dialog").getByLabel("Длительность, дн.").fill("7");
   await page.getByRole("dialog").getByRole("button", { name: "Сохранить" }).click();
   await expect(page.locator('.wx-table-container [data-id="500"] .wx-col-workDays').first()).toHaveText("7", { timeout: 15_000 });
@@ -216,7 +216,10 @@ test("edge cases", async ({ browser }: { browser: Browser }, testInfo) => {
   watch(mp, "phone", problems);
   await mp.goto("/");
   await expect(mp.locator(".wx-bar").first()).toBeVisible();
+  // A tap on the row only selects it; the pencil at the row's end opens the card.
   await mp.locator('.wx-table-container [data-id="1"] .wx-col-text').first().tap();
+  await expect(mp.getByRole("dialog")).toHaveCount(0);
+  await mp.getByRole("button", { name: "Редактировать задачу №1", exact: true }).tap();
   const mdlg = mp.getByRole("dialog");
   await expect(mdlg).toBeVisible();
   const mbox = (await mdlg.boundingBox())!;

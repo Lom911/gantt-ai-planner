@@ -7,6 +7,9 @@ import type { Zoom } from "@/components/gantt/mapping";
 export interface LayoutPrefs {
   splitRatio?: number; // chart pane width / whole width
   gridWidth?: number; // px, grid (table) part of the chart
+  // Set with every gridWidth saved since the grid got its pencil (edit) column; a width saved
+  // before that is widened by the column on load (see savedGridWidth).
+  gridIncludesEdit?: boolean;
   columns?: Record<string, number>; // px per grid column id
   zoom?: Zoom;
   chatCollapsed?: boolean; // chat pane folded into a rail so the chart gets the whole width
@@ -35,7 +38,16 @@ function sanitize(raw: unknown): LayoutPrefs {
   }
   if (typeof r.zoom === "string" && ZOOMS.has(r.zoom as Zoom)) out.zoom = r.zoom as Zoom;
   if (typeof r.chatCollapsed === "boolean") out.chatCollapsed = r.chatCollapsed;
+  if (r.gridIncludesEdit === true) out.gridIncludesEdit = true;
   return out;
+}
+
+// The grid width to open with, or undefined for the default (the columns' sum). A width saved
+// before the pencil column existed would now hide it behind the timeline, so it grows by that
+// column's width — once: the next drag saves the new width with `gridIncludesEdit`.
+export function savedGridWidth(prefs: LayoutPrefs, editColumnWidth: number): number | undefined {
+  if (!prefs.gridWidth) return undefined;
+  return prefs.gridIncludesEdit ? prefs.gridWidth : prefs.gridWidth + editColumnWidth;
 }
 
 export function loadLayoutPrefs(): LayoutPrefs {

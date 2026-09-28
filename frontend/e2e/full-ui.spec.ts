@@ -85,8 +85,9 @@ async function gridRows(page: Page) {
 async function uiDiff(page: Page, p: PlanResp): Promise<{ bad: string[]; rows: number; bars: number }> {
   const bad: string[] = [];
   const caption = await page.getByText(/^Старт \d{2}\.\d{2}\.\d{4} · Окончание/).innerText();
-  const want = `Старт ${ru(p.plan.project_start)} · Окончание ${ru(p.plan.project_end)}`;
-  if (caption !== want) bad.push(`подпись «${caption}»≠«${want}»`);
+  const span = Math.round((Date.parse(p.plan.project_end) - Date.parse(p.plan.project_start)) / 86_400_000) + 1;
+  const want = `Старт ${ru(p.plan.project_start)} · Окончание ${ru(p.plan.project_end)} (${span} `;
+  if (!caption.startsWith(want)) bad.push(`подпись «${caption}»≠«${want}…»`);
   // all grid rows: top of the list, then scrolled to the bottom (the grid is virtualized)
   const seen = new Map<number, Awaited<ReturnType<typeof gridRows>>[number]>();
   for (const r of await gridRows(page)) seen.set(r.id, r);
@@ -140,7 +141,7 @@ async function mutate(page: Page, timeoutOrAction: number | (() => Promise<void>
   return plan(page);
 }
 async function openTask(page: Page, id: number) {
-  await page.locator(`.wx-table-container [data-id="${id}"] .wx-col-text`).first().click();
+  await page.locator(`.wx-table-container [data-id="${id}"] .wx-col-text`).first().dblclick();
   await expect(page.getByRole("dialog")).toBeVisible();
   return page.getByRole("dialog");
 }

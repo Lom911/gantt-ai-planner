@@ -24,8 +24,22 @@ class AddTask(BaseModel):
     description: str = ""
     assignee: str | None = None
     duration: int = Field(ge=1, le=999)
-    predecessors: list[PredRef] = Field(default_factory=list)
-    after_id: int | None = None
+    predecessors: list[PredRef] = Field(
+        default_factory=list, description="Задачи, после окончания которых начинается новая"
+    )
+    after_id: int | None = Field(
+        default=None,
+        description="id задачи, после которой поставить новую в списке; без него — в конец",
+    )
+
+
+class DeleteTask(BaseModel):
+    """Удалить задачу. Связи через неё сохраняются: каждый её предшественник становится
+    предшественником каждого её последователя, лаги двух связей складываются (не больше
+    365 дней)."""  # also the op's description in the JSON schema; 365 = MAX_LAG
+
+    op: Literal["delete_task"]
+    id: int
 
 
 class UpdateTask(BaseModel):
@@ -72,11 +86,6 @@ class RemoveDependency(BaseModel):
     op: Literal["remove_dependency"]
     predecessor_id: int
     successor_id: int
-
-
-class DeleteTask(BaseModel):
-    op: Literal["delete_task"]
-    id: int
 
 
 class SetProjectStart(BaseModel):
