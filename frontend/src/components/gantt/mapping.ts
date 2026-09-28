@@ -151,3 +151,37 @@ export function dayAtOffset(cells: readonly ScaleCell[], x: number): string | nu
   }
   return null;
 }
+
+// Revealing a change the user can't see (see GanttView's `reveal`): a rectangle in client
+// coordinates, as getBoundingClientRect() returns it.
+export interface Box {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+// Whether any part of `a` (a bar) lies inside `b` (the chart's visible area).
+export function boxesOverlap(a: Box, b: Box): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+// Scroll offsets that bring a bar into view: its row about a third of the way down the chart and
+// its start a little right of the left edge, so the arrow coming into it shows too. `bar` is the
+// task's position inside the chart (SVAR's `$x`/`$y`), `view` the size of the visible area.
+export function revealScroll(
+  bar: { x: number; y: number },
+  view: { width: number; height: number },
+): { left: number; top: number } {
+  return {
+    left: Math.max(0, Math.round(bar.x - Math.min(160, view.width / 4))),
+    top: Math.max(0, Math.round(bar.y - view.height / 3)),
+  };
+}
+
+// The topmost of `ids` in the plan's row order — the one to scroll to; null if none is in the
+// plan any more (deleted meanwhile).
+export function firstInPlanOrder(plan: ScheduledPlan, ids: readonly number[]): number | null {
+  const wanted = new Set(ids);
+  return plan.tasks.find((t) => wanted.has(t.id))?.id ?? null;
+}
