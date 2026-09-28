@@ -20,6 +20,7 @@
   --gantt-changed-bg: rgba(170, 59, 255, 0.16);
   --gantt-today: rgba(170, 59, 255, 0.08);
   --gantt-selected-day: rgba(57, 131, 235, 0.14);
+  --gantt-weekend: rgba(15, 23, 42, 0.045);
   --gantt-start: #16a34a;
   /* SVAR Willow's default bar color, for the legend (which sits outside SVAR's theme scope). */
   --gantt-task: #3983eb;
@@ -32,6 +33,7 @@
   --gantt-changed-bg: rgba(192, 132, 252, 0.2);
   --gantt-today: rgba(192, 132, 252, 0.12);
   --gantt-selected-day: rgba(55, 169, 239, 0.2);
+  --gantt-weekend: rgba(255, 255, 255, 0.05);
   --gantt-start: #4ade80;
   --gantt-task: #37a9ef;
 }
@@ -94,7 +96,17 @@
   }
 }
 
-/* highlightTime(date, "day") returns "gantt-today" for the current day column. */
+/* highlightTime(date, "day") returns "gantt-weekend" for Saturdays and Sundays: a bar spans them,
+   but they aren't working days, so a duration doesn't count them. Declared first: a weekend that
+   is also today or the picked day shows as that. */
+.gantt-weekend {
+  background: var(--gantt-weekend);
+}
+.wx-scale .gantt-weekend {
+  color: var(--wx-color-font-alt, #6b7280);
+}
+
+/* …"gantt-today" for the current day column. */
 .gantt-today {
   background: var(--gantt-today);
 }
@@ -130,6 +142,7 @@
    an inline left/width: the positioning comes from its own `.wx-weekend` class. Our classes need
    the same, or the column collapses to zero height at the chart's left edge (so the "today" tint
    never showed below the header). */
+.wx-gantt-holidays > .gantt-weekend,
 .wx-gantt-holidays > .gantt-today,
 .wx-gantt-holidays > .gantt-project-start,
 .wx-gantt-holidays > .gantt-selected-day {
