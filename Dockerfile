@@ -27,4 +27,7 @@ ENV PATH="/app/.venv/bin:$PATH" STATIC_DIR=/app/static PYTHONUNBUFFERED=1 PYTHON
 USER 10001
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
-CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--workers", "1", "--no-access-log"]
+# Keep-alive 180 s (uvicorn's default is 5 s): Caddy keeps idle upstream connections for 2 minutes and
+# reuses them; one uvicorn had already closed made a POST (not replayable) fail with a 502. It also
+# broke local clients that reuse a socket after a pause ("socket hang up" in e2e).
+CMD ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--workers", "1", "--no-access-log", "--timeout-keep-alive", "180"]
