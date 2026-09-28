@@ -44,23 +44,31 @@ export function toSvarLinks(plan: ScheduledPlan): SvarLink[] {
 
 // Browsers fire `click` after any press + release on the same element — including the end of a
 // bar drag or resize. Such a click must not open the task modal on top of the change the user
-// just made, so a pointer that moved more than a few pixels since pointerdown isn't a click.
+// just made, so a pointer that moved more than a few pixels since pointerdown isn't a click. A
+// finger wanders more than a mouse during a plain tap, so touch and pen get a wider margin.
 const DRAG_CLICK_THRESHOLD_PX = 4;
-export function isDragEnd(down: { x: number; y: number } | null, up: { x: number; y: number }): boolean {
-  return down != null && Math.hypot(up.x - down.x, up.y - down.y) > DRAG_CLICK_THRESHOLD_PX;
+const TOUCH_DRAG_CLICK_THRESHOLD_PX = 12;
+export function isDragEnd(
+  down: { x: number; y: number } | null,
+  up: { x: number; y: number },
+  pointerType = "mouse",
+): boolean {
+  const threshold = pointerType === "mouse" ? DRAG_CLICK_THRESHOLD_PX : TOUCH_DRAG_CLICK_THRESHOLD_PX;
+  return down != null && Math.hypot(up.x - down.x, up.y - down.y) > threshold;
 }
 
 // SVAR (@svar-ui/lib-dom `locate`) marks both grid rows and gantt bars with a `data-id`
-// attribute holding the task id. We use it to open the task modal from a genuine pointer
-// double click or the grid's pencil button (bubbling up from the row/bar to our own
-// container), instead of SVAR's API events (`select-task` also fires on keyboard navigation).
+// attribute holding the task id. We use it to open the task modal from a genuine pointer click
+// (bubbling up from the row/bar to our own container), instead of SVAR's API events
+// (`select-task` also fires on keyboard navigation).
 export function closestTaskId(target: EventTarget | null): number | null {
   if (!(target instanceof Element)) return null;
   // A click on a bar's link connector (`.wx-link`, the little dot at each end used to draw a
   // dependency) still bubbles up through the bar's own `[data-id]` element — without this guard
   // it would pop the task modal open *and* cover the target connector before the user's second
-  // click can land on it, making it impossible to ever finish drawing a link.
-  if (target.closest(".wx-link")) return null;
+  // click can land on it, making it impossible to ever finish drawing a link. Same for the ✕ that
+  // deletes a selected link: SVAR renders it inside the bar, and the card popped up over the deletion.
+  if (target.closest(".wx-link, .wx-delete-button, .wx-delete-button-icon")) return null;
   const el = target.closest("[data-id]");
   const raw = el?.getAttribute("data-id");
   if (!raw) return null;

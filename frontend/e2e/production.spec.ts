@@ -150,6 +150,8 @@ test("deleting a link in the chart removes the dependency on the server", async 
   await page.locator(".wx-delete-button-icon").first().click();
 
   await expect.poll(depsOnServer).toBe(before - 1);
+  // The ✕ sits inside the bar; deleting the link must not also open that task's card.
+  await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
 // The browser fires `click` after the press + release that ends a bar drag; it used to open the
