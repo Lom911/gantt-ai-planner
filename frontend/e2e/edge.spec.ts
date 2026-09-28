@@ -160,6 +160,13 @@ test("edge cases", async ({ browser }: { browser: Browser }, testInfo) => {
   // E7. Large plan: 500 tasks
   const t0 = Date.now();
   await importFile(page, "big-500.xlsx");
+  // The chat turn just above changed the plan; if the browser hasn't refetched it yet, the import
+  // carries the old version and is refused (409) with «Нажмите «Загрузить» ещё раз» — do just that.
+  const conflict = page.getByRole("dialog").getByText(/План только что изменился/);
+  await expect
+    .poll(async () => (await conflict.isVisible()) || (await plan(page)).plan.tasks.length === 500, { timeout: 30_000 })
+    .toBe(true);
+  if (await conflict.isVisible()) await page.getByRole("button", { name: "Загрузить", exact: true }).click();
   await expect.poll(async () => (await plan(page)).plan.tasks.length, { timeout: 30_000 }).toBe(500);
   await expect(page.locator('.wx-table-container [data-id="1"]').first()).toBeVisible();
   const renderMs = Date.now() - t0;

@@ -114,6 +114,68 @@ test("a click selects a task, a double click or the pencil opens its card", asyn
   await expect(dialog.getByRole("heading").first()).toHaveText(/^№2 /);
 });
 
+// Dragging or resizing a bar selects its task, like a click does (SVAR swallows the click that
+// ends a drag). The bar's tooltip is hidden while the bar is dragged (it would show the dates from
+// before the drag) and shows the saved dates afterwards, not the ones from before.
+test("dragging or resizing a bar selects its task; the tooltip never shows stale dates", async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.goto("/");
+  await expect(page.locator(".wx-bar").first()).toBeVisible();
+  const row = (id: number) => page.locator(`.wx-table-container [data-id="${id}"]`).first();
+  const tooltip = page.getByRole("tooltip");
+  const duration = async (id: number) => {
+    const body = await (await page.request.get("/api/plan")).json();
+    return (body.plan.tasks as { id: number; duration: number }[]).find((t) => t.id === id)!.duration;
+  };
+
+  await row(4).locator(".wx-col-text").click();
+  await expect(row(4)).toHaveClass(/wx-selected/);
+
+  // Shrink «Корзина и оформление заказа» (№14) by two day cells from its right edge.
+  const before = await duration(14);
+  const bar = page.locator('.wx-bar[data-id="14"]');
+  await bar.scrollIntoViewIfNeeded();
+  const box = (await bar.boundingBox())!;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(box.x + box.width / 2, y);
+  await expect(tooltip).toContainText(`${before} раб.дн.`);
+  const x = box.x + box.width - 3;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x - 40, y, { steps: 8 });
+  await page.mouse.move(x - 77, y, { steps: 8 });
+  await expect(tooltip).toBeHidden();
+  await page.mouse.up();
+  await expect(row(14).locator(".wx-cell").nth(4)).toHaveText(String(before - 2));
+  await expect(row(14)).toHaveClass(/wx-selected/);
+  await expect(row(4)).not.toHaveClass(/wx-selected/);
+  await page.mouse.move(box.x + 10, y, { steps: 3 });
+  await expect(tooltip).toContainText(`${before - 2} раб.дн.`);
+
+  // Moving a whole bar selects it too.
+  await page.locator('.wx-bar[data-id="13"]').scrollIntoViewIfNeeded();
+  const moved = (await page.locator('.wx-bar[data-id="13"]').boundingBox())!;
+  const mx = moved.x + moved.width / 2, my = moved.y + moved.height / 2;
+  await page.mouse.move(mx, my);
+  await page.mouse.down();
+  await page.mouse.move(mx + 40, my, { steps: 8 });
+  await page.mouse.move(mx + 77, my, { steps: 8 });
+  await page.mouse.up();
+  await expect(row(13)).toHaveClass(/wx-selected/);
+  await expect(row(14)).not.toHaveClass(/wx-selected/);
+
+  // So does a drag brought back to where it started (SVAR then sends no `update-task`).
+  const back = (await page.locator('.wx-bar[data-id="14"]').boundingBox())!;
+  const bx = back.x + back.width / 2, by = back.y + back.height / 2;
+  await page.mouse.move(bx, by);
+  await page.mouse.down();
+  await page.mouse.move(bx + 60, by, { steps: 8 });
+  await page.mouse.move(bx + 3, by, { steps: 8 });
+  await page.mouse.up();
+  await expect(row(14)).toHaveClass(/wx-selected/);
+  await expect(row(14).locator(".wx-cell").nth(4)).toHaveText(String(before - 2));
+});
+
 test("the chat folds into a rail so the chart gets the whole width, and stays folded after a reload", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/");

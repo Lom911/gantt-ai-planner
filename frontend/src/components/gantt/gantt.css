@@ -183,3 +183,10 @@
 .gantt-host > .wx-theme > .wx-theme > .wx-tooltip-area {
   height: 100%;
 }
+
+/* A bar's tooltip is hidden while the bar is pressed — dragged or resized (GanttView's
+   hideTooltipWhilePressed; the class is on <body> because SVAR portals the tooltip out of the
+   chart): it would show the dates from before the drag. */
+body.gantt-bar-pressed .wx-tooltip {
+  visibility: hidden !important;
+}

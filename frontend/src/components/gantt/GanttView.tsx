@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Gantt, Tooltip, Willow, WillowDark, type IApi } from "@svar-ui/react-gantt";
 import "@svar-ui/react-gantt/all.css";
 import "./wx-icons/wx-icons.css";
@@ -47,35 +47,48 @@ function disableCompactMode(api: IApi) {
   store.init = (state) => init({ ...state, _compactMode: false } as typeof state);
 }
 
-// SVAR's own tooltip (`Tooltip`/`content`) resolves `data-task-id` off the hovered element for us
-// and hands back its own `ITask` (an intentionally loose `[key: string]: any` shape) — declaring
-// every field here as optional (rather than importing our stricter `SvarTask`, whose fields are
-// required) is what makes this assignable to SVAR's own content-prop type, since a required field
-// on our side that ITask can't statically prove it has would fail that check even though the
-// object handed over at runtime is exactly the `SvarTask` we fed in via `tasks`.
-interface TaskTooltipFields {
-  text?: string;
-  start?: Date;
-  end?: Date;
-  workDays?: number;
-  assignee?: string;
-  slack?: number;
-}
+// SVAR's own tooltip (`Tooltip`/`content`) resolves `data-task-id` off the hovered element and hands
+// over a snapshot of its own task, taken when the tooltip appears and kept until the pointer moves.
+// After a drag or resize that snapshot still held the dates from before it (and the working days
+// even after SVAR's optimistic update, which only moves start/end), so the tooltip reads the saved
+// task by id from the plan instead: an open tooltip re-renders as soon as the server answers.
+const TooltipPlan = createContext<ScheduledPlan | null>(null);
 
 function BarTooltip({ data }: { api: IApi; data: Record<string, unknown> }) {
-  const task = data.task as TaskTooltipFields | undefined;
-  if (!task?.start || !task.end) return null;
+  const id = (data.task as { id?: number | string } | undefined)?.id;
+  const task = useContext(TooltipPlan)?.tasks.find((t) => t.id === Number(id));
+  if (!task) return null;
   return (
     <div className="max-w-64 rounded-md border border-border bg-popover px-2.5 py-2 text-xs text-popover-foreground shadow-md">
-      <div className="font-medium">{task.text}</div>
+      <div className="font-medium">{task.name}</div>
       <div className="text-muted-foreground">
-        {formatRu(task.start)}–{formatRu(addDays(task.end, -1))}
-        {task.workDays != null && <> · {task.workDays} раб.дн.</>}
+        {formatRu(task.start)}–{formatRu(task.end)} · {task.duration} раб.дн.
       </div>
       {task.assignee && <div className="text-muted-foreground">{task.assignee}</div>}
-      {task.slack != null && <div className="text-muted-foreground">Резерв {task.slack} дн.</div>}
+      <div className="text-muted-foreground">Резерв {task.slack} дн.</div>
     </div>
   );
+}
+
+// While a bar is pressed (dragged or resized) its tooltip would keep showing the dates from before
+// the drag, stuck where the press started, so it's hidden (gantt.css) until the pointer moves again
+// after the release — by then SVAR's tooltip has re-resolved it next to the pointer. The class goes
+// on <body>: SVAR portals the tooltip out of the chart's container.
+const BAR_PRESSED = "gantt-bar-pressed";
+function hideTooltipWhilePressed() {
+  const host = document.body;
+  host.classList.add(BAR_PRESSED);
+  const pressed = new AbortController();
+  const show = () => host.classList.remove(BAR_PRESSED);
+  const release = (e: PointerEvent) => {
+    pressed.abort();
+    // A touch or pen release may be followed by no pointermove at all (and SVAR shows no tooltip
+    // for touch anyway), so only a mouse waits for one.
+    if (e.pointerType === "mouse") window.addEventListener("pointermove", show, { once: true });
+    else show();
+  };
+  window.addEventListener("pointerup", release, { signal: pressed.signal });
+  window.addEventListener("pointercancel", release, { signal: pressed.signal });
 }
 
 // The grid's last column: an explicit way into the task modal, since a single click on a row only
@@ -235,10 +248,20 @@ export function GanttView(props: {
     // already applied it to its own store by the time this fires. By the same point, `ev.task`
     // is the *resolved* task (real `start`/`end` Date objects, not raw pixel deltas), so we don't
     // need to reimplement SVAR's own cell-to-date math.
+    //
+    // SVAR swallows the click that ends a drag or resize, so the task doesn't get selected the way a
+    // click selects it: the previously selected row stayed tinted while another bar changed. The
+    // dragged task is selected here instead — on `update-task` with `diff` (a move/resize that
+    // changed the dates) and on `drag-task` with `inProgress: false` (one that snapped back to the
+    // same cells, which sends no `update-task`).
+    api.on("drag-task", (ev: { id: number | string; inProgress?: boolean }) => {
+      if (ev.inProgress === false) api.exec("select-task", { id: ev.id });
+    });
     api.on(
       "update-task",
       (ev: { id: number | string; task: { start?: Date; end?: Date }; diff?: number; inProgress?: boolean }) => {
         if (handlers.current.readOnly) return;
+        if (ev.diff != null) api.exec("select-task", { id: ev.id });
         if (ev.diff == null && ev.inProgress == null) return;
         const { start, end } = ev.task;
         if (!start || !end) return;
@@ -363,6 +386,8 @@ export function GanttView(props: {
 
   // Where the last press started, to tell a click from the end of a bar drag (see isDragEnd).
   const pointerDown = useRef<{ x: number; y: number } | null>(null);
+  // Unmounted mid-press (e.g. the plan was reset): don't leave the tooltip hidden app-wide.
+  useEffect(() => () => document.body.classList.remove(BAR_PRESSED), []);
 
   const ThemeWrapper = props.dark ? WillowDark : Willow;
 
@@ -373,6 +398,9 @@ export function GanttView(props: {
       // Capture phase: SVAR's own drag handling must not be able to hide the press from us.
       onPointerDownCapture={(e) => {
         pointerDown.current = { x: e.clientX, y: e.clientY };
+        if (e.button === 0 && e.target instanceof Element && e.target.closest(".wx-bar")) {
+          hideTooltipWhilePressed();
+        }
       }}
       onClick={(e) => {
         if (isDragEnd(pointerDown.current, { x: e.clientX, y: e.clientY })) return;
@@ -411,19 +439,21 @@ export function GanttView(props: {
     >
       <RuLocale>
         <ThemeWrapper fonts={false}>
-          <Tooltip api={api ?? undefined} content={BarTooltip}>
-            <Gantt
-              init={init}
-              tasks={tasks}
-              links={links}
-              columns={columns}
-              gridWidth={gridWidth}
-              taskTypes={TASK_TYPES}
-              readonly={props.readOnly}
-              {...ZOOM_PRESETS[props.zoom]}
-              highlightTime={highlightTime}
-            />
-          </Tooltip>
+          <TooltipPlan.Provider value={props.plan}>
+            <Tooltip api={api ?? undefined} content={BarTooltip}>
+              <Gantt
+                init={init}
+                tasks={tasks}
+                links={links}
+                columns={columns}
+                gridWidth={gridWidth}
+                taskTypes={TASK_TYPES}
+                readonly={props.readOnly}
+                {...ZOOM_PRESETS[props.zoom]}
+                highlightTime={highlightTime}
+              />
+            </Tooltip>
+          </TooltipPlan.Provider>
         </ThemeWrapper>
       </RuLocale>
     </div>
