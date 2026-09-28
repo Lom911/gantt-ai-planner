@@ -63,6 +63,20 @@ test("closestTaskId ignores a click on a link connector so link-drawing isn't in
   expect(closestTaskId(dot)).toBeNull();
 });
 
+test("closestTaskId ignores the delete button of a selected link, which SVAR renders inside the bar", () => {
+  const bar = document.createElement("div");
+  bar.setAttribute("data-id", "17");
+  bar.className = "wx-bar wx-task";
+  const button = document.createElement("div");
+  button.className = "wx-delete-button";
+  const icon = document.createElement("i");
+  icon.className = "wx-delete-button-icon";
+  button.appendChild(icon);
+  bar.appendChild(button);
+  expect(closestTaskId(icon)).toBeNull();
+  expect(closestTaskId(button)).toBeNull();
+});
+
 describe("highlightDay", () => {
   const today = new Date(2026, 8, 26);
   it("marks the project start and today in the day scale", () => {
@@ -113,6 +127,12 @@ test("a click that ends a bar drag doesn't count as a click on the task", () => 
   expect(isDragEnd({ x: 100, y: 50 }, { x: 177, y: 50 })).toBe(true); // dragged 2 days
   expect(isDragEnd({ x: 100, y: 50 }, { x: 102, y: 51 })).toBe(false); // hand jitter on a click
   expect(isDragEnd(null, { x: 5, y: 5 })).toBe(false); // no pointerdown seen (keyboard)
+});
+
+test("a finger may wander a little more than a mouse before a tap stops being a tap", () => {
+  expect(isDragEnd({ x: 100, y: 50 }, { x: 107, y: 50 })).toBe(true); // mouse: 7px is a drag
+  expect(isDragEnd({ x: 100, y: 50 }, { x: 107, y: 50 }, "touch")).toBe(false); // finger: still a tap
+  expect(isDragEnd({ x: 100, y: 50 }, { x: 125, y: 50 }, "touch")).toBe(true); // finger dragged
 });
 
 describe("durationLabel", () => {

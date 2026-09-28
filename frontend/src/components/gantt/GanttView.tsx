@@ -388,7 +388,7 @@ export function GanttView(props: {
 
   // Where the last press started and whether the pointer has since moved away, to tell a click
   // from the end of a bar drag (see isDragEnd) — including a drag brought back to where it began.
-  const pointerDown = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const pointerDown = useRef<{ x: number; y: number; type: string; moved: boolean } | null>(null);
   // Unmounted mid-press (e.g. the plan was reset): don't leave the tooltip hidden app-wide.
   useEffect(() => () => document.body.classList.remove(BAR_PRESSED), []);
 
@@ -400,18 +400,20 @@ export function GanttView(props: {
       className={`gantt-host h-full min-h-0${props.zoom === "day" ? " gantt-day-zoom" : ""}`}
       // Capture phase: SVAR's own drag handling must not be able to hide the press from us.
       onPointerDownCapture={(e) => {
-        pointerDown.current = { x: e.clientX, y: e.clientY, moved: false };
+        pointerDown.current = { x: e.clientX, y: e.clientY, type: e.pointerType, moved: false };
         if (e.button === 0 && e.target instanceof Element && e.target.closest(".wx-bar")) {
           hideTooltipWhilePressed();
         }
       }}
       onPointerMoveCapture={(e) => {
         const press = pointerDown.current;
-        if (press && !press.moved && isDragEnd(press, { x: e.clientX, y: e.clientY })) press.moved = true;
+        if (press && !press.moved && isDragEnd(press, { x: e.clientX, y: e.clientY }, press.type)) press.moved = true;
       }}
       onClick={(e) => {
         const press = pointerDown.current;
-        if (press?.moved || isDragEnd(press, { x: e.clientX, y: e.clientY })) return;
+        pointerDown.current = null;
+        // `detail` is 0 for a click from the keyboard (Enter/Space on the pencil): no press to judge.
+        if (e.detail > 0 && (press?.moved || isDragEnd(press, { x: e.clientX, y: e.clientY }, press?.type))) return;
         // The bottom scale row holds the day numbers (in day zoom): a click there picks that column.
         const dayCell = e.target instanceof Element ? e.target.closest(DAY_CELL) : null;
         if (dayCell) {
