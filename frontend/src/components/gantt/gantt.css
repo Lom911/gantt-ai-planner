@@ -20,7 +20,7 @@
   --gantt-changed-bg: rgba(170, 59, 255, 0.16);
   --gantt-today: rgba(170, 59, 255, 0.08);
   --gantt-selected-day: rgba(57, 131, 235, 0.14);
-  --gantt-weekend: rgba(15, 23, 42, 0.045);
+  --gantt-weekend: rgba(15, 23, 42, 0.075);
   --gantt-start: #16a34a;
   /* SVAR Willow's default bar color, for the legend (which sits outside SVAR's theme scope). */
   --gantt-task: #3983eb;
@@ -33,7 +33,7 @@
   --gantt-changed-bg: rgba(192, 132, 252, 0.2);
   --gantt-today: rgba(192, 132, 252, 0.12);
   --gantt-selected-day: rgba(55, 169, 239, 0.2);
-  --gantt-weekend: rgba(255, 255, 255, 0.05);
+  --gantt-weekend: rgba(0, 0, 0, 0.28);
   --gantt-start: #4ade80;
   --gantt-task: #37a9ef;
 }
