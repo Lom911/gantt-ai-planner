@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime
@@ -224,15 +225,28 @@ def create_app(
     return app
 
 
+# Vite's default asset names: `<name>-<8-char base64url hash>.<ext>`.
+_HASHED_NAME = re.compile(r"-[A-Za-z0-9_-]{8}\.[a-z0-9]+$")
+
+
 def _mount_spa(app: FastAPI, settings: Settings) -> None:
     if not settings.static_dir or not Path(settings.static_dir).is_dir():
         return
     root = Path(settings.static_dir).resolve()
+    assets = root / "assets"
+    # Without Cache-Control a browser caches index.html heuristically (a share of the time since
+    # Last-Modified), so after a deploy it kept loading the previous build. So every file is
+    # revalidated on each load, except the ones Vite names by their content hash in assets/
+    # (`index-DQn1RFkq.js`), which never change under the same URL. The check is on the file
+    # actually served: a missing /assets/… falls back to index.html, which must not be cached.
+    revalidate = {"Cache-Control": "no-cache"}
+    immutable = {"Cache-Control": "public, max-age=31536000, immutable"}
 
     # HEAD too: uptime monitors and link checkers probe "/" with it (FileResponse omits the body).
     @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def spa(path: str) -> FileResponse:
         candidate = (root / path).resolve()
         if path and candidate.is_file() and candidate.is_relative_to(root):
-            return FileResponse(candidate)
-        return FileResponse(root / "index.html")
+            hashed = candidate.is_relative_to(assets) and bool(_HASHED_NAME.search(candidate.name))
+            return FileResponse(candidate, headers=immutable if hashed else revalidate)
+        return FileResponse(root / "index.html", headers=revalidate)
