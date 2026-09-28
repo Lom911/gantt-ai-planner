@@ -113,7 +113,9 @@ test("project start is marked on the timeline and in the legend", async ({ page 
   const bar = (await firstBar.boundingBox())!;
   expect(line.height).toBeGreaterThan(100);
   expect(Math.abs(line.x - bar.x)).toBeLessThanOrEqual(2);
-  const legend = page.getByText(/^Старт \d{2}\.\d{2}\.\d{4} · Окончание \d{2}\.\d{2}\.\d{4} \(\d+ (день|дня|дней)\)$/);
+  const legend = page.getByText(
+    /^Старт \d{2}\.\d{2}\.\d{4} · Окончание \d{2}\.\d{2}\.\d{4} \(\d+ рабоч(ий день|их дня|их дней), всего \d+ (день|дня|дней)\)$/,
+  );
   await expect(legend).toBeVisible();
   // The grid's «Начало» column shows the first task (no predecessors) starting on that date.
   const [, dd, mm] = /^Старт (\d{2})\.(\d{2})/.exec(await legend.innerText())!;
