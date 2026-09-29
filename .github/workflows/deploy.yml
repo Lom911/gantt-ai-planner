@@ -31,6 +31,12 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     environment: production
+    # Job-level permissions replace the workflow-level ones, hence the first two are repeated.
+    # `actions: read` is for the manual-run CI gate below (it lists CI's runs via the API).
+    permissions:
+      contents: read
+      packages: write
+      actions: read
     env:
       # The exact commit CI tested for workflow_run; the dispatched main commit otherwise.
       DEPLOY_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
@@ -39,6 +45,18 @@ jobs:
         with:
           ref: ${{ env.DEPLOY_SHA }}
           persist-credentials: false
+
+      # A workflow_run deploy only starts after CI succeeded for its commit (see `if:` above);
+      # a manual run would deploy the main head even right after a failed CI. So before anything
+      # is built or pushed, require a completed, successful CI run for exactly this commit on a
+      # push to main of this repository (the latest such run decides; one still running fails
+      # the job - wait for it and dispatch again). Logic and tests: scripts/ci-passed.sh,
+      # deploy/tests/test_ci_passed.sh.
+      - name: Require green CI for this commit (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-passed.sh "$GITHUB_REPOSITORY" "$DEPLOY_SHA"
 
       - id: meta
         run: echo "tag=sha-${DEPLOY_SHA:0:7}" >> "$GITHUB_OUTPUT"
