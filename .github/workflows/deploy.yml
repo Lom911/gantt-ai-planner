@@ -20,7 +20,7 @@ jobs:
     #   fork PR opened from the fork's own `main` also matches — so the run must additionally come
     #   from a `push` event in this repository (a PR run has event `pull_request`);
     # - a manual run must be dispatched on main (the UI lets you pick any branch).
-    # Second layer (external setting, see docs/runbook.md §1): the `production` environment has
+    # Second layer (external setting): the `production` environment has
     # the deployment branch policy `main` (required reviewers are optional).
     if: >-
       (github.event_name == 'workflow_run'
@@ -118,7 +118,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "ref=$TAG@$digest" >> "$GITHUB_OUTPUT"
           # The server only accepts digest-pinned refs: keep this one findable for manual
-          # deploys and rollbacks (docs/runbook.md section 2).
+          # deploys and rollbacks.
           echo "pushed $IMAGE:$TAG@$digest"
           {
             echo "### Image"

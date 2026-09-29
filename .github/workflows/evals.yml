@@ -9,7 +9,7 @@ name: Evals
 # - a passing run -> closes any open `evals` issue.
 # Each run costs LLM tokens and uses 6 new sessions + 7 chat messages of production's
 # per-IP / daily limits from the runner's address - keep it weekly. Scheduled runs happen
-# on the default branch only; see docs/runbook.md section 6.
+# on the default branch only.
 
 on:
   schedule:
@@ -67,7 +67,7 @@ jobs:
 
           The model wording varies between runs: re-run the failed scenario with
           `uv run python -m evals.run --base-url ... --only NAME -v` before blaming the app.
-          See backend/evals/README.md and docs/runbook.md section 6.
+          See backend/evals/README.md.
           EOF
             } > "$report"
           fi

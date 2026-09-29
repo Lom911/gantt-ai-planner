@@ -12,8 +12,8 @@
 # The only accepted shape is `sha-<7..40 hex>@sha256:<64 hex>` - what CD
 # sends. Tags are mutable in GHCR; the digest pins the exact image that CI
 # scanned and pushed, so bare `sha-<hex>` tags are refused for manual
-# deploys and rollbacks too (docs/runbook.md section 2 shows how to look
-# the digest up).
+# deploys and rollbacks too (the digest: `docker buildx imagetools inspect
+# <image>:sha-<hex>`).
 #
 # authorized_keys line for the CI deploy key:
 #   restrict,command="/usr/local/bin/planner-deploy-wrapper" ssh-ed25519 AAAA... gha-gantt-planner

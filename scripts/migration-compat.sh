@@ -7,8 +7,8 @@
 # serves that schema and must pass a smoke test. That is exactly the state
 # production is in after planner-deploy rolls back a release whose
 # migrations already ran: the rollback restarts only `app` on the previous
-# image and never un-migrates (docs/runbook.md section 2, "Правило:
-# миграции только обратно совместимые" - this check enforces it).
+# image and never un-migrates, so migrations must stay backward compatible -
+# this check enforces it.
 #
 # Roles as in production (deploy/initdb/10-roles.sh): planner_owner runs the
 # migrations, the app connects as planner_app (DML only). Everything lives in

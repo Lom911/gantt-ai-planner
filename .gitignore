@@ -15,3 +15,9 @@ frontend/playwright-report/
 
 # Claude Code agent worktrees (local only)
 .claude/worktrees/
+
+# docs/ holds only what the brief asks for; other working documents stay local
+docs/*
+!docs/roadmap-to-production.md
+!docs/demo.gif
+!docs/demo.mp4

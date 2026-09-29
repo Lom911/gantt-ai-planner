@@ -11,7 +11,7 @@
 # <ref> is ALWAYS `sha-<hex>@sha256:<digest>` (what CD sends): GHCR tags are
 # mutable, the digest pins the exact image CI scanned and pushed. A bare
 # `sha-<hex>` is refused - for a manual deploy or rollback look the digest up
-# first (docs/runbook.md section 2). Compose accepts `name:tag@digest`
+# first (`docker buildx imagetools inspect <image>:sha-<hex>`). Compose accepts `name:tag@digest`
 # references, so the value goes into IMAGE_TAG in .env as is.
 #
 # Flow: lock -> pull the new image -> pg_dump snapshot of the database ->
@@ -90,7 +90,7 @@ done < <(sed -nE 's#^[[:space:]]+file:[[:space:]]+\./(secrets/[A-Za-z0-9_.-]+)[[
 prev_tag="$({ grep -E '^IMAGE_TAG=' "$ENV_FILE" || true; } | tail -n1 | cut -d= -f2-)"
 if [ -z "$prev_tag" ]; then
     echo "planner-deploy: could not read current IMAGE_TAG from $ENV_FILE" >&2
-    echo "  (the first release is deployed by hand, see docs/runbook.md section 1)" >&2
+    echo "  (the first release is deployed by hand)" >&2
     exit 1
 fi
 # .env is the rollback target: a value that is not a ref we would accept from
@@ -99,7 +99,7 @@ fi
 # of it at all.
 if ! [[ "$prev_tag" =~ $TAG_RE ]]; then
     echo "planner-deploy: current IMAGE_TAG '$prev_tag' in $ENV_FILE is not a digest-pinned ref" >&2
-    echo "  (must match $TAG_RE); fix it by hand before deploying (docs/runbook.md section 2)" >&2
+    echo "  (must match $TAG_RE); fix it by hand before deploying" >&2
     exit 1
 fi
 
@@ -143,8 +143,8 @@ timed_out() {
 }
 
 # pg_dump of the live database right before the new release can migrate it:
-# the way back if a migration turns out to be destructive (restore by hand,
-# docs/runbook.md section 2). Written to a mktemp file in the backup dir (a
+# the way back if a migration turns out to be destructive (restore by hand
+# with pg_restore). Written to a mktemp file in the backup dir (a
 # unique name: no two runs, and no run and a leftover, ever share a temp file)
 # and renamed, so a failed or interrupted dump never looks like a usable
 # snapshot. --lock-wait-timeout: pg_dump gives up instead of queueing behind a
@@ -195,7 +195,7 @@ snapshot_db() {
 # image's alembic does not know that revision, `alembic upgrade head` would
 # fail, and `app` (depends_on: migrate completed) would never start. That is
 # why migrations must be backward compatible - the previous app has to run
-# on the migrated schema (docs/runbook.md section 2; CI checks it).
+# on the migrated schema (CI checks it: scripts/migration-compat.sh).
 env_written=0
 deployed=0
 finish() {
