@@ -9,9 +9,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sse_starlette import EventSourceResponse
 
-from app.api.deps import check_origin, client_ip, get_service, require_session
+from app.api.deps import check_origin, client_ip, get_service, limit_mutations, require_session
 from app.db import repo
-from app.services.errors import AgentBusy
+from app.db.models import ChatMessageRow
+from app.services.errors import AgentBusy, NotFound
 from app.services.ratelimit import check_chat_limits
 
 router = APIRouter(prefix="/api/chat")
@@ -80,19 +81,75 @@ async def chat(
     return EventSourceResponse(gen(), ping=15, sep="\n")
 
 
+def _message(r: ChatMessageRow) -> dict[str, Any]:
+    return {
+        "id": r.id,
+        "role": r.role,
+        "content": r.content,
+        "created_at": r.created_at.isoformat(),
+        "meta": r.meta,
+    }
+
+
 @router.get("/history")
 async def history(
     request: Request, session_id: uuid.UUID = Depends(require_session)
 ) -> list[dict[str, Any]]:
+    """The current conversation (see /conversations)."""
     async with get_service(request).sessionmaker() as db:
-        rows = await repo.recent_chat_messages(db, session_id, 200)
+        current = await repo.current_conversation_id(db, session_id)
+        rows = await repo.recent_chat_messages(db, session_id, 200, current)
+    return [_message(r) for r in rows]
+
+
+# A page load and «Очистить чат» start a new conversation: the chat shows only the current one,
+# and the agent sees only it. Earlier ones are kept (and still count toward the chat limits) and
+# are listed under «История», read-only.
+@router.post(
+    "/conversations",
+    status_code=201,
+    dependencies=[Depends(check_origin), Depends(limit_mutations)],
+)
+async def new_conversation(
+    request: Request, session_id: uuid.UUID = Depends(require_session)
+) -> dict[str, str]:
+    service = get_service(request)
+    async with service.sessionmaker() as db, db.begin():
+        conversation_id = await repo.start_conversation(db, session_id)
+    # A mass deletion the assistant asked about was a question in the old conversation: a «да»
+    # typed into the new one, whose agent never saw the question, must not confirm it.
+    await service.discard_confirmation(session_id, origin="agent")
+    # Other tabs of the session show the same chat.
+    service.bus.publish(session_id, {"type": "chat_reset"})
+    return {"id": str(conversation_id)}
+
+
+@router.get("/conversations")
+async def conversations(
+    request: Request, session_id: uuid.UUID = Depends(require_session)
+) -> list[dict[str, Any]]:
+    """Earlier conversations, most recently active first (the current one is the chat itself)."""
+    async with get_service(request).sessionmaker() as db:
+        current = await repo.current_conversation_id(db, session_id)
+        rows = await repo.list_conversations(db, session_id, exclude=current, limit=50)
     return [
         {
-            "id": r.id,
-            "role": r.role,
-            "content": r.content,
-            "created_at": r.created_at.isoformat(),
-            "meta": r.meta,
+            "id": str(c.id),
+            "started_at": c.started_at.isoformat(),
+            "last_at": c.last_at.isoformat(),
+            "message_count": c.message_count,
+            "title": c.title,
         }
-        for r in rows
+        for c in rows
     ]
+
+
+@router.get("/conversations/{conversation_id}")
+async def conversation(
+    conversation_id: uuid.UUID, request: Request, session_id: uuid.UUID = Depends(require_session)
+) -> list[dict[str, Any]]:
+    async with get_service(request).sessionmaker() as db:
+        rows = await repo.recent_chat_messages(db, session_id, 200, conversation_id)
+    if not rows:
+        raise NotFound("Диалог не найден")
+    return [_message(r) for r in rows]

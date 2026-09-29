@@ -185,6 +185,16 @@ export interface ChatMessage {
   };
 }
 
+// GET /api/chat/conversations: an earlier conversation, for «История».
+export interface ChatConversation {
+  id: string;
+  started_at: string;
+  last_at: string;
+  message_count: number;
+  // The first user message (cut to 200 characters).
+  title: string;
+}
+
 // spec §7 / backend/app/agent/loop.py: chat SSE event stream.
 export type ChatEvent =
   | { type: "text_delta"; text: string }

@@ -172,7 +172,12 @@ class Agent:
                             content=user_text,
                             turn_id=turn_id,
                         )
-                    history = await repo.recent_chat_messages(db, session_id, self._history_limit)
+                    # The turn's own conversation, pinned for its reply too: a new one started
+                    # meanwhile (another tab reloaded) must not get an answer without a question.
+                    conversation_id = await repo.turn_conversation_id(db, session_id, turn_id)
+                    history = await repo.recent_chat_messages(
+                        db, session_id, self._history_limit, conversation_id
+                    )
                 user_confirmed = is_explicit_confirmation(user_text)
                 if not user_confirmed:
                     # Any reply other than «да» answers the assistant's question: a mass deletion
@@ -246,6 +251,7 @@ class Agent:
                         content=text,
                         turn_id=turn_id,
                         meta=meta,
+                        conversation_id=conversation_id,
                     )
                 outcome = failure["code"] if failure else "done"
                 yield failure or {

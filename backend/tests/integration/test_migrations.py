@@ -179,3 +179,74 @@ async def test_0004_upgrades_and_downgrades_cleanly_on_existing_data():
             assert await _one(conn, "SELECT count(*) FROM chat_usage") == 2
         code, out = await _alembic(url, "upgrade", "head")
         assert code == 0, out
+
+
+async def test_0005_gives_each_sessions_chat_its_own_conversation():
+    async with _scratch_db() as (url, scratch):
+        code, out = await _alembic(url, "upgrade", "0004")
+        assert code == 0, out
+        s1, s2 = uuid.uuid4(), uuid.uuid4()
+        async with scratch.begin() as conn:
+            for sid in (s1, s2):
+                await conn.execute(
+                    text(
+                        "INSERT INTO sessions (id, token_hash, current_version) VALUES (:id, :h, 1)"
+                    ),
+                    {"id": sid, "h": uuid.uuid4().bytes * 2},
+                )
+                for role in ("user", "assistant"):
+                    await conn.execute(
+                        text(
+                            "INSERT INTO chat_messages (session_id, role, content, meta)"
+                            " VALUES (:sid, :role, 'x', '{}')"
+                        ),
+                        {"sid": sid, "role": role},
+                    )
+
+        code, out = await _alembic(url, "upgrade", "head")
+        assert code == 0, out
+        async with scratch.connect() as conn:
+            # Each session's messages are its current conversation; sessions don't share one.
+            per_session = (
+                await conn.execute(
+                    text(
+                        "SELECT s.id, count(DISTINCT m.conversation_id),"
+                        " bool_and(m.conversation_id = s.chat_conversation_id)"
+                        " FROM sessions s JOIN chat_messages m ON m.session_id = s.id GROUP BY s.id"
+                    )
+                )
+            ).all()
+            assert sorted((count, same) for _, count, same in per_session) == [(1, True), (1, True)]
+            distinct = "SELECT count(DISTINCT chat_conversation_id) FROM sessions"
+            assert await _one(conn, distinct) == 2
+            # The previous image inserts messages without the column and sessions without the id.
+            await conn.execute(
+                text(
+                    "INSERT INTO sessions (id, token_hash, current_version)"
+                    " VALUES (gen_random_uuid(), 'h', 0)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO chat_messages (session_id, role, content, meta)"
+                    " VALUES (:sid, 'user', 'old image', '{}')"
+                ),
+                {"sid": s1},
+            )
+            await conn.commit()
+        code, out = await _alembic(url, "check")
+        assert code == 0, out  # the ORM models describe exactly the migrated schema
+
+        code, out = await _alembic(url, "downgrade", "0004")
+        assert code == 0, out
+        async with scratch.connect() as conn:
+            columns = await _one(
+                conn,
+                "SELECT count(*) FROM information_schema.columns WHERE"
+                " (table_name, column_name) IN (('sessions', 'chat_conversation_id'),"
+                " ('chat_messages', 'conversation_id'))",
+            )
+            assert columns == 0
+            assert await _one(conn, "SELECT count(*) FROM chat_messages") == 5
+        code, out = await _alembic(url, "upgrade", "head")
+        assert code == 0, out

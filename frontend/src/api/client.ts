@@ -1,5 +1,6 @@
 import type {
   ApplyResponse,
+  ChatConversation,
   ChatMessage,
   ImportFailure,
   ImportSuccess,
@@ -110,6 +111,9 @@ export const api = {
     post<PlanResponse>("/api/plan/redo", { expected_version: expectedVersion ?? null }),
   reset: () => post<PlanResponse>("/api/plan/reset"),
   chatHistory: () => request<ChatMessage[]>("/api/chat/history"),
+  newConversation: () => post<{ id: string }>("/api/chat/conversations"),
+  conversations: () => request<ChatConversation[]>("/api/chat/conversations"),
+  conversation: (id: string) => request<ChatMessage[]>(`/api/chat/conversations/${encodeURIComponent(id)}`),
   taskHistory: (id: number) => request<TaskHistoryEntry[]>(`/api/plan/tasks/${id}/history`),
   meta: () => request<MetaResponse>("/api/meta"),
   deleteSession: () => request<void>("/api/session", { method: "DELETE" }),

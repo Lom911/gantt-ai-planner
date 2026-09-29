@@ -101,3 +101,18 @@ test("on a phone a saved collapse is ignored: the chat tab still opens the chat"
   fireEvent.click(screen.getByRole("button", { name: "Чат" }));
   expect(screen.getByText("chat content")).toBeVisible();
 });
+
+test("the chat's own buttons sit in its header on a desktop and above it on a phone", () => {
+  const { unmount } = render(
+    <SplitLayout left={<div />} right={<div />} chatActions={<button type="button">История</button>} />,
+  );
+  expect(screen.getByRole("button", { name: "История" })).toBeVisible();
+  expect(screen.getByText("Чат с агентом")).toBeInTheDocument();
+  unmount();
+
+  setWidth(390);
+  render(<SplitLayout left={<div />} right={<div />} chatActions={<button type="button">История</button>} />);
+  fireEvent.click(screen.getByRole("button", { name: "Чат" }));
+  expect(screen.getByRole("button", { name: "История" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Свернуть чат" })).not.toBeInTheDocument();
+});

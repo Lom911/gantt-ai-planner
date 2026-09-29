@@ -185,13 +185,53 @@ async def add_chat_message(
     content: str,
     turn_id: uuid.UUID | None = None,
     meta: dict[str, Any] | None = None,
+    conversation_id: uuid.UUID | None = None,
 ) -> ChatMessageRow:
+    """Joins the session's current conversation unless the caller pins one (an agent turn's
+    reply goes where its question went, even if a new conversation started meanwhile)."""
+    if conversation_id is None:
+        conversation_id = await current_conversation_id(db, session_id)
     row = ChatMessageRow(
-        session_id=session_id, role=role, content=content, turn_id=turn_id, meta=meta or {}
+        session_id=session_id,
+        role=role,
+        content=content,
+        turn_id=turn_id,
+        meta=meta or {},
+        conversation_id=conversation_id,
     )
     db.add(row)
     await db.flush()
     return row
+
+
+async def current_conversation_id(db: AsyncSession, session_id: uuid.UUID) -> uuid.UUID | None:
+    return await db.scalar(
+        select(SessionRow.chat_conversation_id).where(SessionRow.id == session_id)
+    )
+
+
+async def start_conversation(db: AsyncSession, session_id: uuid.UUID) -> uuid.UUID:
+    """Point the session at a new, empty conversation; the previous one stays in the table."""
+    new_id = uuid.uuid4()
+    await db.execute(
+        update(SessionRow).where(SessionRow.id == session_id).values(chat_conversation_id=new_id)
+    )
+    return new_id
+
+
+async def turn_conversation_id(
+    db: AsyncSession, session_id: uuid.UUID, turn_id: uuid.UUID
+) -> uuid.UUID | None:
+    """The conversation the turn's user message was saved to."""
+    return await db.scalar(
+        select(ChatMessageRow.conversation_id)
+        .where(
+            ChatMessageRow.session_id == session_id,
+            ChatMessageRow.turn_id == turn_id,
+            ChatMessageRow.role == "user",
+        )
+        .limit(1)
+    )
 
 
 async def delete_turn_messages(db: AsyncSession, session_id: uuid.UUID, turn_id: uuid.UUID) -> None:
@@ -203,15 +243,59 @@ async def delete_turn_messages(db: AsyncSession, session_id: uuid.UUID, turn_id:
 
 
 async def recent_chat_messages(
-    db: AsyncSession, session_id: uuid.UUID, limit: int
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    limit: int,
+    conversation_id: uuid.UUID | None = None,
 ) -> list[ChatMessageRow]:
+    """The last `limit` messages, oldest first: of one conversation, or (None) of the session."""
+    stmt = select(ChatMessageRow).where(ChatMessageRow.session_id == session_id)
+    if conversation_id is not None:
+        stmt = stmt.where(ChatMessageRow.conversation_id == conversation_id)
     rows = await db.scalars(
-        select(ChatMessageRow)
-        .where(ChatMessageRow.session_id == session_id)
-        .order_by(ChatMessageRow.created_at.desc(), ChatMessageRow.id.desc())
-        .limit(limit)
+        stmt.order_by(ChatMessageRow.created_at.desc(), ChatMessageRow.id.desc()).limit(limit)
     )
     return list(reversed(rows.all()))
+
+
+class ConversationSummary(NamedTuple):
+    id: uuid.UUID
+    started_at: datetime
+    last_at: datetime
+    message_count: int
+    # The first user message (or, in a conversation without one, the first message: an import
+    # note), cut to 200 characters.
+    title: str
+
+
+async def list_conversations(
+    db: AsyncSession, session_id: uuid.UUID, *, exclude: uuid.UUID | None, limit: int
+) -> list[ConversationSummary]:
+    """The session's conversations, most recently active first; `exclude` is the current one."""
+    rows = await db.execute(
+        text(
+            """
+            SELECT conversation_id AS id,
+                   min(created_at) AS started_at,
+                   max(created_at) AS last_at,
+                   count(*) AS message_count,
+                   coalesce(
+                       (array_agg(left(content, 200) ORDER BY created_at, id)
+                           FILTER (WHERE role = 'user'))[1],
+                       (array_agg(left(content, 200) ORDER BY created_at, id))[1]
+                   ) AS title
+            FROM chat_messages
+            WHERE session_id = :sid
+              AND conversation_id IS NOT NULL
+              AND conversation_id IS DISTINCT FROM :exclude
+            GROUP BY conversation_id
+            ORDER BY max(created_at) DESC
+            LIMIT :limit
+            """
+        ),
+        {"sid": session_id, "exclude": exclude, "limit": limit},
+    )
+    return [ConversationSummary(*row) for row in rows.all()]
 
 
 async def add_chat_usage(db: AsyncSession) -> int:
