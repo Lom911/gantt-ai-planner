@@ -1,4 +1,5 @@
 import type { MoveTaskOp, Operation, ScheduledTask, UpdateTaskOp } from "@/api/types";
+import { formatRu } from "@/lib/dates";
 
 export interface TaskForm {
   name: string;
@@ -7,6 +8,12 @@ export interface TaskForm {
   duration: number;
   constraint: string | null;
 }
+
+type TaskField = keyof TaskForm;
+type FieldValue = TaskForm[TaskField];
+
+// In the order the card shows them.
+const TASK_FIELDS: readonly TaskField[] = ["name", "description", "assignee", "duration", "constraint"];
 
 export function formFromTask(task: ScheduledTask): TaskForm {
   return {
@@ -79,8 +86,9 @@ export function buildTaskOps(
 // the user has NOT touched (`form[key] === baseline[key]`) count: `rebaseForm` leaves a field
 // the user is editing alone, so if that same field also changed server-side the baseline would
 // stay "stale" forever and a render-time `setState` on it would loop until React throws
-// "Too many re-renders". Such a field is deliberately ignored here; the version precondition on
-// save (`expected_version`) is what surfaces that conflict to the user.
+// "Too many re-renders". Such a field is deliberately ignored here; `findConflicts` is what
+// surfaces that conflict to the user. The version precondition on save (`expected_version`)
+// can't: the version comes from the cache, which already holds the other change.
 export function needsRebase(form: TaskForm, baseline: TaskForm, fresh: TaskForm): boolean {
   return (Object.keys(fresh) as (keyof TaskForm)[]).some(
     (key) => form[key] === baseline[key] && fresh[key] !== baseline[key],
@@ -123,6 +131,83 @@ export function rebaseForm(
   }
 
   return { form: nextForm, baseline: nextBaseline };
+}
+
+// A field the user is editing that also changed server-side (agent, another tab) since they began:
+// `was` is the value they started from (`baseline`), `now` the server's current one, `mine` theirs.
+export interface FieldConflict {
+  field: TaskField;
+  was: FieldValue;
+  now: FieldValue;
+  mine: FieldValue;
+}
+
+// Text is compared trimmed, as `buildTaskOps` sends it.
+function sameValue(a: FieldValue, b: FieldValue): boolean {
+  return typeof a === "string" && typeof b === "string" ? a.trim() === b.trim() : a === b;
+}
+
+// Saving such a field would silently overwrite the other change, so the card asks first. A field
+// the user hasn't edited (it just follows the server, see `rebaseForm`) or one the server changed
+// to exactly the user's value is not a conflict.
+export function findConflicts(form: TaskForm, baseline: TaskForm, fresh: TaskForm): FieldConflict[] {
+  return TASK_FIELDS.filter(
+    (field) =>
+      !sameValue(form[field], baseline[field]) &&
+      !sameValue(fresh[field], baseline[field]) &&
+      !sameValue(fresh[field], form[field]),
+  ).map((field) => ({ field, was: baseline[field], now: fresh[field], mine: form[field] }));
+}
+
+function copyField<K extends TaskField>(to: TaskForm, from: TaskForm, field: K) {
+  to[field] = from[field];
+}
+
+// The user's answer to every current conflict. Either way `baseline` moves to the server value, so
+// the conflict is gone: «Сохранить моё» ("mine") keeps the user's value in the form, which now
+// diffs against the server's and is sent on save; «Взять новое» ("theirs") puts the server value
+// in the form too, dropping the user's edit of that field. Other edits stay as they are.
+export function resolveConflicts(
+  form: TaskForm,
+  baseline: TaskForm,
+  fresh: TaskForm,
+  keep: "mine" | "theirs",
+): { form: TaskForm; baseline: TaskForm } {
+  const nextForm = { ...form };
+  const nextBaseline = { ...baseline };
+  for (const { field } of findConflicts(form, baseline, fresh)) {
+    copyField(nextBaseline, fresh, field);
+    if (keep === "theirs") copyField(nextForm, fresh, field);
+  }
+  return { form: nextForm, baseline: nextBaseline };
+}
+
+const CONFLICT_SUBJECTS: Record<TaskField, string> = {
+  name: "Название изменилось",
+  description: "Описание изменилось",
+  assignee: "Исполнитель изменился",
+  duration: "Длительность изменилась",
+  constraint: "Ограничение «Не раньше» изменилось",
+};
+
+const SHOWN_TEXT_LENGTH = 60;
+
+function showValue(field: TaskField, value: FieldValue): string {
+  if (field === "duration") return String(value);
+  if (field === "constraint") return typeof value === "string" && value ? formatRu(value) : "не задано";
+  const text = String(value ?? "").trim();
+  if (field === "assignee") return text || "не назначен";
+  if (!text) return "пусто";
+  return `«${text.length > SHOWN_TEXT_LENGTH ? `${text.slice(0, SHOWN_TEXT_LENGTH)}…` : text}»`;
+}
+
+// «Длительность изменилась, пока вы редактировали: теперь 7 дн. (было 5). Ваше значение: 4.»
+export function describeConflict({ field, was, now, mine }: FieldConflict): string {
+  const unit = field === "duration" ? " дн." : "";
+  return (
+    `${CONFLICT_SUBJECTS[field]}, пока вы редактировали: теперь ${showValue(field, now)}${unit} ` +
+    `(было ${showValue(field, was)}). Ваше значение: ${showValue(field, mine)}.`
+  );
 }
 
 // Client-side validation shown inline in the task modal before a save is attempted.
