@@ -14,6 +14,7 @@ import { ConfirmationBanner } from "@/components/ConfirmationBanner";
 import { useConfirmation } from "@/hooks/useConfirmation";
 import { loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layoutPrefs";
 import { ProjectDates } from "@/components/gantt/ProjectDates";
+import { ChatActions } from "@/components/chat/ChatActions";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { Toolbar } from "@/components/Toolbar";
 import { TaskModal } from "@/components/task/TaskModal";
@@ -52,6 +53,13 @@ function App() {
   const revealSeq = useRef(0);
   const requestReveal = (ids: number[], mode: RevealMode, version: number | null) =>
     setReveal({ ids, mode, version, key: ++revealSeq.current });
+  // A click on a change line in the chat (or in its «История») scrolls the chart to that task.
+  const focusTaskFromChat = (id: number) => {
+    flashFocused([id]);
+    requestReveal([id], "scroll", null);
+  };
+  // «Сегодня» in the toolbar: every click is a new request for the chart to center today.
+  const [todayRequest, setTodayRequest] = useState(0);
   const { agentBusy } = useSessionEvents((ids, change) => {
     if (!ids.length) return;
     flashFocused(ids);
@@ -101,6 +109,7 @@ function App() {
           agentBusy={agentBusy}
           zoom={zoom}
           onZoom={changeZoom}
+          onToday={() => setTodayRequest((n) => n + 1)}
           onImport={() => setImportOpen(true)}
           onAddTask={() => setNewTask({ anchorId: null })}
           theme={theme}
@@ -130,6 +139,7 @@ function App() {
                     onOpenTask={(id) => setOpenTaskId(id)}
                     onApply={onApplyPlanOps}
                     reveal={readyReveal}
+                    centerToday={todayRequest}
                     onRevealed={() => setReveal(null)}
                     onFlash={(ids) => flashFocused(ids, REVEAL_HIGHLIGHT_MS)}
                   />
@@ -138,15 +148,8 @@ function App() {
                 <ResourcePanel plan={data.plan} onOpenTask={(id) => setOpenTaskId(id)} />
               </div>
             }
-            right={
-              <ChatPanel
-                onFocusTask={(id) => {
-                  flashFocused([id]);
-                  requestReveal([id], "scroll", null);
-                }}
-                agentBusy={agentBusy}
-              />
-            }
+            right={<ChatPanel onFocusTask={focusTaskFromChat} agentBusy={agentBusy} />}
+            chatActions={<ChatActions agentBusy={agentBusy} onFocusTask={focusTaskFromChat} />}
             chatBusy={agentBusy}
           />
         )}

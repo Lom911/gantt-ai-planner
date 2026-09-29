@@ -10,9 +10,21 @@ vi.mock("@/api/chatStream", () => ({
   },
 }));
 const history: { rows: ChatMessage[] } = { rows: [] };
-vi.mock("@/api/client", () => ({ api: { chatHistory: async () => history.rows } }));
+const calls: string[] = [];
+vi.mock("@/api/client", () => ({
+  api: {
+    chatHistory: async () => {
+      calls.push("history");
+      return history.rows;
+    },
+    newConversation: async () => {
+      calls.push("new");
+      return { id: "c" };
+    },
+  },
+}));
 
-const { useChat } = await import("./useChat");
+const { CHAT_HISTORY_KEY, clearChat, useChat } = await import("./useChat");
 
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -25,6 +37,26 @@ const row = (id: number, role: ChatMessage["role"], content: string, meta = {}):
   content,
   created_at: "2026-09-26T10:00:00Z",
   meta,
+});
+
+// First in the file: the page's first load of the chat (the conversation is started once per page).
+test("opening the page starts a new conversation, once, before the chat is read", async () => {
+  history.rows = [];
+  const first = renderHook(() => useChat(), { wrapper });
+  await waitFor(() => expect(calls).toEqual(["new", "history"]));
+  const again = renderHook(() => useChat(), { wrapper }); // a remount, with its own query cache
+  await waitFor(() => expect(calls).toEqual(["new", "history", "history"]));
+  first.unmount();
+  again.unmount();
+});
+
+test("clearing the chat starts a new conversation and empties it at once", async () => {
+  const client = new QueryClient();
+  client.setQueryData(CHAT_HISTORY_KEY, [row(1, "user", "привет")]);
+  calls.length = 0;
+  await clearChat(client);
+  expect(calls).toEqual(["new"]);
+  expect(client.getQueryData(CHAT_HISTORY_KEY)).toEqual([]);
 });
 
 test("a failed turn is shown once, as the assistant reply the server saved", async () => {

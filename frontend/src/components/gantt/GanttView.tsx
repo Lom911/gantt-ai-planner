@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import {
   ZOOM_PRESETS,
   boxesOverlap,
+  centerDayScroll,
   closestTaskId,
   dayAtOffset,
   durationLabel,
@@ -141,6 +142,8 @@ export function GanttView(props: {
   onRevealed?(): void;
   // Highlight tasks the chart has just scrolled to (the app's own flash, held a little longer).
   onFlash?(ids: number[]): void;
+  // The toolbar's «Сегодня»: a new value scrolls today to the middle of the chart.
+  centerToday?: number;
 }) {
   // Handlers passed into `init` are captured once (the Gantt is only initialized once);
   // routing through a ref keeps them current without re-running `init`.
@@ -459,6 +462,23 @@ export function GanttView(props: {
     const timer = setTimeout(() => setOffscreen(null), 20_000);
     return () => clearTimeout(timer);
   }, [offscreen]);
+
+  const centerToday = props.centerToday;
+  useEffect(() => {
+    if (!centerToday || !api) return;
+    const chart = containerRef.current?.querySelector(".wx-chart");
+    const scales = api.getState()._scales;
+    // Each cell carries `date` and `unit` at runtime (see dayOfCell).
+    const cells = scales?.rows.at(-1)?.cells as ScaleCell[] | undefined;
+    // A zero width: the chart is on the phone's other tab. It opens where it was.
+    if (!chart?.clientWidth || !scales || !cells) return;
+    const left = centerDayScroll(cells, scales.end, new Date(), chart.clientWidth);
+    if (left == null) {
+      toast.info("Сегодняшнего дня нет на шкале: план начинается позже или уже закончился");
+      return;
+    }
+    api.exec("scroll-chart", { left });
+  }, [centerToday, api]);
 
   const ThemeWrapper = props.dark ? WillowDark : Willow;
 

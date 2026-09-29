@@ -194,6 +194,7 @@ test("dragging or resizing a bar selects its task; the tooltip never shows stale
   await expect(page.getByRole("dialog")).toHaveCount(0); // a drag, even one brought back, isn't a click
 });
 
+// (A reload also starts the chat over — chat-history.spec.ts — so the turn is checked before it.)
 test("the chat folds into a rail so the chart gets the whole width, and stays folded after a reload", async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.goto("/");
@@ -218,7 +219,6 @@ test("the chat folds into a rail so the chart gets the whole width, and stays fo
   await expect(input).toBeHidden();
   await page.getByRole("button", { name: "Развернуть чат" }).click();
   await expect(input).toBeVisible();
-  await expect(page.getByText(/Изменено задач: \d+/).first()).toBeVisible();
   expect(Math.abs(1600 - (await chartPane(page).boundingBox())!.width - chatWidth)).toBeLessThanOrEqual(3);
 });
 

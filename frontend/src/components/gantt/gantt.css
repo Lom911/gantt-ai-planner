@@ -19,6 +19,8 @@
   --gantt-changed: #aa3bff;
   --gantt-changed-bg: rgba(170, 59, 255, 0.16);
   --gantt-today: rgba(170, 59, 255, 0.08);
+  /* The toolbar's «Сегодня»: text and border in the hue of the today column's tint. */
+  --gantt-today-accent: #9333ea;
   --gantt-selected-day: rgba(57, 131, 235, 0.14);
   --gantt-weekend: rgba(15, 23, 42, 0.038);
   --gantt-start: #16a34a;
@@ -32,6 +34,7 @@
   --gantt-changed: #c084fc;
   --gantt-changed-bg: rgba(192, 132, 252, 0.2);
   --gantt-today: rgba(192, 132, 252, 0.12);
+  --gantt-today-accent: #c084fc;
   --gantt-selected-day: rgba(55, 169, 239, 0.2);
   --gantt-weekend: rgba(0, 0, 0, 0.14);
   --gantt-start: #4ade80;

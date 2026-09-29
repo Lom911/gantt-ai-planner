@@ -152,6 +152,30 @@ export function dayAtOffset(cells: readonly ScaleCell[], x: number): string | nu
   return null;
 }
 
+// The scroll offset that puts the middle of `day` in the middle of a chart `viewWidth` wide, from
+// the bottom scale row (days, weeks or months: a day's place inside a week/month cell is
+// interpolated by time); null when the day isn't on the scale. SVAR clamps the offset at the
+// scale's ends itself.
+export function centerDayScroll(
+  cells: readonly ScaleCell[],
+  scaleEnd: Date,
+  day: Date,
+  viewWidth: number,
+): number | null {
+  const noon = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 12).getTime();
+  let left = 0;
+  for (const [i, cell] of cells.entries()) {
+    const start = cell.date.getTime();
+    const end = (cells[i + 1]?.date ?? scaleEnd).getTime();
+    if (noon >= start && noon < end) {
+      const x = left + ((noon - start) / (end - start)) * cell.width;
+      return Math.max(0, Math.round(x - viewWidth / 2));
+    }
+    left += cell.width;
+  }
+  return null;
+}
+
 // Revealing a change the user can't see (see GanttView's `reveal`): a rectangle in client
 // coordinates, as getBoundingClientRect() returns it.
 export interface Box {

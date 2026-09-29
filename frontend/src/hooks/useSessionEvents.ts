@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ensureSession } from "@/api/client";
 import { cachedPlanVersion, PLAN_KEY } from "./usePlan";
 import { CONFIRMATION_KEY } from "./useConfirmation";
+import { CHAT_CONVERSATIONS_KEY, CHAT_HISTORY_KEY } from "./useChat";
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 60_000;
@@ -135,11 +136,18 @@ export function useSessionEvents(onPlanChanged: (ids: number[], change: PlanChan
       void queryClient.invalidateQueries({ queryKey: CONFIRMATION_KEY });
     };
 
+    // Another tab (or this one) started a new conversation: the chat shows only the current one.
+    const handleChatReset = () => {
+      void queryClient.invalidateQueries({ queryKey: CHAT_HISTORY_KEY });
+      void queryClient.invalidateQueries({ queryKey: CHAT_CONVERSATIONS_KEY });
+    };
+
     const detach = (es: EventSource) => {
       es.removeEventListener("agent_status", handleAgentStatus);
       es.removeEventListener("plan_changed", handlePlanChanged);
       es.removeEventListener("confirmation_pending", handleConfirmation);
       es.removeEventListener("confirmation_resolved", handleConfirmation);
+      es.removeEventListener("chat_reset", handleChatReset);
     };
 
     let attempt = 0;
@@ -167,6 +175,7 @@ export function useSessionEvents(onPlanChanged: (ids: number[], change: PlanChan
       es.addEventListener("plan_changed", handlePlanChanged);
       es.addEventListener("confirmation_pending", handleConfirmation);
       es.addEventListener("confirmation_resolved", handleConfirmation);
+      es.addEventListener("chat_reset", handleChatReset);
       es.onopen = () => {
         attempt = 0;
       };

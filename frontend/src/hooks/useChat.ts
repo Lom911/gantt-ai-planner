@@ -1,11 +1,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/api/client";
 import { streamChat } from "@/api/chatStream";
 import type { Change, ChatMessage } from "@/api/types";
 import { PLAN_KEY } from "./usePlan";
 
 export const CHAT_HISTORY_KEY = ["chat", "history"];
+export const CHAT_CONVERSATIONS_KEY = ["chat", "conversations"];
+
+// Opening or reloading the page starts a new conversation: the chat opens empty and the agent
+// doesn't remember the old one, which stays under «История». Once per page load, shared by every
+// mount of the chat and every refetch of its history. If it fails, the chat just shows the
+// conversation it was on.
+let pageConversation: Promise<unknown> | null = null;
+
+export const chatHistoryQuery = {
+  queryKey: CHAT_HISTORY_KEY,
+  queryFn: async () => {
+    pageConversation ??= api.newConversation().catch(() => undefined);
+    await pageConversation;
+    return api.chatHistory();
+  },
+};
+
+// «Очистить чат»: the same as a reload, without reloading.
+export async function clearChat(queryClient: QueryClient): Promise<void> {
+  await api.newConversation();
+  queryClient.setQueryData(CHAT_HISTORY_KEY, []);
+  void queryClient.invalidateQueries({ queryKey: CHAT_CONVERSATIONS_KEY });
+}
 
 // Human labels for the tool-call status line shown while the agent is working.
 const TOOL_LABELS: Record<string, string> = {
@@ -35,7 +58,7 @@ export function useChat(): {
   error: string | null;
 } {
   const queryClient = useQueryClient();
-  const historyQuery = useQuery({ queryKey: CHAT_HISTORY_KEY, queryFn: api.chatHistory });
+  const historyQuery = useQuery(chatHistoryQuery);
   // Optimistic messages for the turn in flight (the user's text + the streamed reply). They sit
   // on top of the persisted history and are cleared once the invalidated history query has
   // re-fetched and (now) contains them — deriving `messages` this way needs no effect to keep a

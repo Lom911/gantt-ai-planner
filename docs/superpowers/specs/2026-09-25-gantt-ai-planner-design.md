@@ -202,7 +202,7 @@ Dependency                            # только FS
   - системный промпт: роль агента, правила, сегодняшняя дата, правила про неоднозначность и разрушительные действия;
   - список инструментов;
   - **компактная таблица текущего плана** (`id | задача | исполнитель | длит | предш | начало | конец | резерв | флаги`);
-  - последние 20 текстовых сообщений чата. Следы вызовов инструментов в историю не попадают: актуальный план и так передаётся каждый ход.
+  - последние 20 текстовых сообщений текущего диалога (см. «Чат» в разделе интерфейса: открытие страницы и «Очистить» начинают новый диалог). Следы вызовов инструментов в историю не попадают: актуальный план и так передаётся каждый ход.
 - **Кэширование.** Системный промпт и инструменты кэшируются (prompt caching).
 - **Правила поведения** (задаются системным промптом и проверяются на сервере):
   - Изменения применяются сразу, отдельного подтверждения не нужно.
@@ -305,7 +305,9 @@ Dependency                            # только FS
 | `GET /api/plan/export` | Файл xlsx |
 | `GET /api/plan/tasks/{id}/history` | История задачи (фаза 3) |
 | `POST /api/chat` | `{message}` → поток `text/event-stream` (раздел 7) |
-| `GET /api/chat/history` | Сообщения чата с diff-сводками |
+| `GET /api/chat/history` | Сообщения текущего диалога с diff-сводками |
+| `POST /api/chat/conversations` | Начать новый диалог (открытие страницы, «Очистить»); прежний остаётся в истории, другие вкладки получают событие `chat_reset` |
+| `GET /api/chat/conversations` · `GET /api/chat/conversations/{id}` | «История»: прошлые диалоги сессии (последние 50) и сообщения одного из них, только чтение |
 | `GET /api/events` | SSE: `plan_changed {version, source, turn_id, changed_task_ids}`, `agent_status {busy}`, heartbeat каждые 20 с |
 | `POST /api/mcp-token` · `DELETE /api/mcp-token` | Выпустить (токен показывается один раз) и отозвать (фаза 2) |
 | `DELETE /api/session` | «Удалить мои данные»: сессия удаляется каскадом, cookie сбрасывается |
@@ -320,14 +322,15 @@ PostgreSQL 17, SQLAlchemy 2 (async, asyncpg), миграции Alembic.
 
 ```
 sessions      (id uuid pk, token_hash bytea unique, current_version int,
-               created_at, last_seen_at)
+               chat_conversation_id uuid, created_at, last_seen_at)
 plan_versions (id bigserial pk, session_id fk→sessions on delete cascade,
                version_no int, snapshot jsonb, source text, turn_id uuid null,
                summary text, diff jsonb, created_at,
                unique(session_id, version_no))
 chat_messages (id bigserial pk, session_id fk cascade, role text, content text,
-               turn_id uuid null, meta jsonb, created_at)
-               index (session_id, created_at), index (created_at)
+               turn_id uuid null, conversation_id uuid null, meta jsonb, created_at)
+               index (session_id, created_at), index (created_at),
+               index (session_id, conversation_id, created_at)
 mcp_tokens    (id uuid pk, session_id fk cascade, token_hash bytea unique,
                prefix text, expires_at, last_used_at, revoked_at, created_at)
 ```
@@ -355,7 +358,7 @@ mcp_tokens    (id uuid pk, session_id fk cascade, token_hash bytea unique,
   - «Загрузить Excel»;
   - «Экспорт»;
   - отменить / повторить;
-  - масштаб (день / неделя / месяц);
+  - масштаб (день / неделя / месяц) и «Сегодня» (цветом как столбец сегодняшнего дня; прокручивает диаграмму так, чтобы сегодняшний день оказался посередине);
   - «Сбросить к демо»;
   - «Подключить MCP»;
   - меню: «Удалить мои данные», тема.
@@ -366,6 +369,7 @@ mcp_tokens    (id uuid pk, session_id fk cascade, token_hash bytea unique,
   - пока работает инструмент, показывается статус;
   - под ответом агента — раскрываемая diff-сводка «Изменено N задач» (было → стало, клик переходит к задаче);
   - подсказки-примеры команд для пустого чата;
+  - каждое открытие или перезагрузка страницы начинает новый диалог: чат пустой, агент прежний диалог не помнит (план и отмена не затрагиваются). «Очистить» в заголовке чата делает то же без перезагрузки. Прежние диалоги сохраняются и открываются кнопкой «История» (только чтение). Лимиты чата считают сообщения всех диалогов; вопрос агента о массовом удалении с новым диалогом снимается;
   - пометка «план отправляется в LLM Anthropic, не загружайте реальные персональные данные».
 - **Модалка задачи.** Форма: название, описание, исполнитель (выбор из существующих или ввод нового), длительность, ограничение «не раньше» (дата, можно снять). Только для чтения:
   - начало, конец, резерв;

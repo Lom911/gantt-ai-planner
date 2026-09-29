@@ -13,10 +13,13 @@ const DEFAULT_RIGHT_WIDTH = 380;
 export function SplitLayout({
   left,
   right,
+  chatActions,
   chatBusy = false,
 }: {
   left: ReactNode;
   right: ReactNode;
+  // Buttons for the chat's header (on a phone, a row above the chat).
+  chatActions?: ReactNode;
   // The agent is working — shown on the collapsed rail, since the chat itself is out of sight.
   chatBusy?: boolean;
 }) {
@@ -130,18 +133,23 @@ export function SplitLayout({
         className="flex min-h-0 min-w-0 flex-1 flex-col"
         hidden={isMobile ? tab !== "chat" : collapsed}
       >
-        {!isMobile && (
-          <div className="flex items-center justify-between border-b border-border py-1 pl-3 pr-1">
-            <span className="text-sm font-medium">Чат с агентом</span>
-            <button
-              type="button"
-              aria-label="Свернуть чат"
-              title="Свернуть чат"
-              className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-              onClick={() => toggleChat(true)}
-            >
-              <PanelRightClose className="h-4 w-4" />
-            </button>
+        {(!isMobile || chatActions) && (
+          <div className="flex items-center gap-1 border-b border-border py-1 pl-3 pr-1">
+            {!isMobile && <span className="mr-auto truncate text-sm font-medium">Чат с агентом</span>}
+            <div className="ml-auto flex shrink-0 items-center gap-0.5">
+              {chatActions}
+              {!isMobile && (
+                <button
+                  type="button"
+                  aria-label="Свернуть чат"
+                  title="Свернуть чат"
+                  className="rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  onClick={() => toggleChat(true)}
+                >
+                  <PanelRightClose className="h-4 w-4" />
+                </button>
+              )}
+            </div>
           </div>
         )}
         <div className="min-h-0 flex-1 overflow-auto">{right}</div>
