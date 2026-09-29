@@ -1,9 +1,10 @@
+import time
 from datetime import date
 
 import pytest
 
 from app.domain.errors import OperationError
-from app.domain.models import Dependency, Plan, Task
+from app.domain.models import MAX_DEPENDENCIES, Dependency, Plan, Task
 from app.domain.operations import apply_operations, operations_adapter, requires_confirmation
 
 MON = date(2026, 9, 21)
@@ -273,9 +274,111 @@ def test_delete_task_clamps_bridged_lag_to_max():
     ]
 
 
-def test_dependency_count_is_capped():
-    from app.domain.models import MAX_DEPENDENCIES
+def test_delete_task_warns_when_bridged_lag_is_clamped():
+    # Two 365-day links become one of 365: the successor moves earlier, so the user must hear it.
+    plan = base_plan()
+    plan.dependencies = [
+        Dependency(predecessor_id=1, successor_id=2, lag=365),
+        Dependency(predecessor_id=2, successor_id=3, lag=365),
+    ]
+    res = apply_operations(plan, ops({"op": "delete_task", "id": 2}))
+    assert res.warnings == [
+        "Задержка связи №1 → №3 после удаления №2 обрезана до 365 дней (было бы 730)"
+    ]
 
+
+def test_delete_task_lag_sum_within_cap_is_not_a_warning():
+    plan = base_plan()
+    plan.dependencies = [
+        Dependency(predecessor_id=1, successor_id=2, lag=200),
+        Dependency(predecessor_id=2, successor_id=3, lag=165),
+    ]
+    res = apply_operations(plan, ops({"op": "delete_task", "id": 2}))
+    assert [(d.predecessor_id, d.successor_id, d.lag) for d in res.plan.dependencies] == [
+        (1, 3, 365)
+    ]
+    assert res.warnings == []
+
+
+def test_delete_task_lag_warnings_are_capped_per_deleted_task():
+    # 2 in × 3 out, every link 365 days: six clamped bridges. Listing each would flood the toasts
+    # and the agent's (length-capped) tool result, so the rest are summed up in one line.
+    plan = hub_plan(2, 3)
+    plan.dependencies = [
+        Dependency(predecessor_id=d.predecessor_id, successor_id=d.successor_id, lag=365)
+        for d in plan.dependencies
+    ]
+    res = apply_operations(plan, ops({"op": "delete_task", "id": 3}))
+    assert res.warnings == [
+        "Задержка связи №1 → №4 после удаления №3 обрезана до 365 дней (было бы 730)",
+        "Задержка связи №1 → №5 после удаления №3 обрезана до 365 дней (было бы 730)",
+        "Задержка связи №1 → №6 после удаления №3 обрезана до 365 дней (было бы 730)",
+        "Ещё связей с задержкой, обрезанной до 365 дней после удаления №3: 3",
+    ]
+
+
+def hub_plan(n_in: int, n_out: int) -> Plan:
+    # Task n_in + 1 is the hub: every task before it precedes it, every task after it follows it.
+    hub, last = n_in + 1, n_in + n_out + 1
+    return Plan(
+        project_start=MON,
+        tasks=[Task(id=i, name=f"T{i}", duration=1) for i in range(1, last + 1)],
+        dependencies=[Dependency(predecessor_id=i, successor_id=hub) for i in range(1, hub)]
+        + [Dependency(predecessor_id=hub, successor_id=j) for j in range(hub + 1, last + 1)],
+    )
+
+
+def test_delete_task_rejects_an_oversized_bridge_before_building_it():
+    # The largest hub a 500-task plan allows: 250 in × 249 out = 62 250 bridges, 31× the cap.
+    # Building them all before the cap check took minutes of CPU on the only worker.
+    plan = hub_plan(250, 249)
+    started = time.perf_counter()
+    with pytest.raises(OperationError) as exc:
+        apply_operations(plan, ops({"op": "delete_task", "id": 251}))
+    assert time.perf_counter() - started < 1.0
+    assert exc.value.index == 0  # refused by the delete itself, not by the end-of-batch check
+    assert f"не может быть больше {MAX_DEPENDENCIES} связей" in exc.value.message
+
+
+def test_delete_task_bridge_cap_counts_the_resulting_plan_exactly():
+    # 40 × 50 = 2000 new links: exactly at the cap, so allowed; one unrelated link more is not.
+    res = apply_operations(hub_plan(40, 50), ops({"op": "delete_task", "id": 41}))
+    assert len(res.plan.dependencies) == MAX_DEPENDENCIES
+    plan = hub_plan(40, 50)
+    plan.dependencies.append(Dependency(predecessor_id=42, successor_id=43))
+    with pytest.raises(OperationError) as exc:
+        apply_operations(plan, ops({"op": "delete_task", "id": 41}))
+    assert f"не может быть больше {MAX_DEPENDENCIES} связей" in exc.value.message
+
+
+def test_delete_task_bridge_does_not_count_links_that_already_exist():
+    # 40 × 40 pairs, 1500 of them already linked directly: the result has 1600 links, under the
+    # cap, although remaining + in × out (3100) is over it — an upper-bound check would refuse it.
+    plan = hub_plan(40, 40)
+    direct = [(a, c) for a in range(1, 41) for c in range(42, 82)][:1500]
+    plan.dependencies += [Dependency(predecessor_id=a, successor_id=c, lag=3) for a, c in direct]
+    res = apply_operations(plan, ops({"op": "delete_task", "id": 41}))
+    assert len(res.plan.dependencies) == 1600
+    lags = {(d.predecessor_id, d.successor_id): d.lag for d in res.plan.dependencies}
+    assert all(lags[pair] == 3 for pair in direct)  # an existing link keeps its larger lag
+    assert lags[(40, 81)] == 0
+
+
+def test_delete_task_refuses_to_bridge_a_task_onto_itself():
+    # 1 → 2 → 1 is a cycle made earlier in the same batch; bridging it would link 1 to itself.
+    with pytest.raises(OperationError) as exc:
+        apply_operations(
+            base_plan(),
+            ops(
+                {"op": "add_dependency", "predecessor_id": 2, "successor_id": 1},
+                {"op": "delete_task", "id": 2},
+            ),
+        )
+    assert exc.value.index == 1
+    assert "задача 1 не может зависеть от самой себя" in exc.value.message
+
+
+def test_dependency_count_is_capped():
     # 70 independent tasks, then every earlier task as a predecessor of every later one:
     # 70*69/2 = 2415 edges > MAX_DEPENDENCIES, added in batches under MAX_BATCH_OPS.
     plan = Plan(

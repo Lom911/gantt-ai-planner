@@ -149,9 +149,10 @@ def apply_operations(
     work = plan.model_copy(deep=True)
     created: list[int] = []
     moved: list[int] = []
+    warnings: list[str] = []  # raised by the ops themselves; constraint warnings come after
     for index, op in enumerate(ops):
         try:
-            _apply_one(work, op, created, moved, before)
+            _apply_one(work, op, created, moved, warnings, before)
         except OperationError as exc:
             exc.index = index
             exc.message = f"Операция {index + 1} ({op.op}): {exc.message}"
@@ -172,7 +173,7 @@ def apply_operations(
         plan=work,
         scheduled=after,
         changes=diff_plans(before, after),
-        warnings=_constraint_warnings(after, moved),
+        warnings=[*warnings, *_constraint_warnings(after, moved)],
         created_task_ids=created,
     )
 
@@ -220,7 +221,12 @@ def _shift_base(plan: Plan, task: Task, moved: list[int], before: ScheduledPlan)
 
 
 def _apply_one(
-    plan: Plan, op: Operation, created: list[int], moved: list[int], before: ScheduledPlan
+    plan: Plan,
+    op: Operation,
+    created: list[int],
+    moved: list[int],
+    warnings: list[str],
+    before: ScheduledPlan,
 ) -> None:
     match op:
         case AddTask():
@@ -286,14 +292,62 @@ def _apply_one(
                 d for d in plan.dependencies if op.id not in (d.predecessor_id, d.successor_id)
             ]
             plan.tasks.remove(task)
-            # Bridging A→B→C into A→C sums the lags; clamp so two large lags can't push the
-            # bridge past MAX_LAG and turn a plain delete into a validation error.
-            for a in incoming:
-                for b in outgoing:
-                    lag = min(a.lag + b.lag, MAX_LAG)
-                    _upsert_dep(plan, a.predecessor_id, b.successor_id, lag)
+            _bridge(plan, op.id, incoming, outgoing, warnings)
         case SetProjectStart():
             plan.project_start = next_workday(op.date)
+
+
+# Clamped-lag warnings listed one by one per deleted task; the rest are counted in one line, so
+# a hub with dozens of long links doesn't flood the toasts or the agent's length-capped result.
+LAG_WARNINGS_PER_DELETE = 3
+
+
+def _bridge(
+    plan: Plan,
+    deleted_id: int,
+    incoming: list[Dependency],
+    outgoing: list[Dependency],
+    warnings: list[str],
+) -> None:
+    """Reconnect A→B→C into A→C for every predecessor A and successor C of the deleted B.
+
+    There are in × out such pairs, tens of thousands on a task with a few hundred links, and
+    building them all before the MAX_DEPENDENCIES check took minutes of CPU on the only worker.
+    So each new link is counted as it is made, against an index of the remaining ones, and the
+    first one over the cap refuses the op. An already linked pair adds nothing, and there are at
+    most as many of those as remaining links, so the loop ends within about MAX_DEPENDENCIES
+    steps however large in × out is.
+    """
+    deps = {(d.predecessor_id, d.successor_id): d for d in plan.dependencies}
+    clamped = 0
+    for a in incoming:
+        for b in outgoing:
+            pred, succ = a.predecessor_id, b.successor_id
+            if pred == succ:  # A→B→A: only a cycle made earlier in the same batch gets here
+                raise OperationError(f"задача {succ} не может зависеть от самой себя")
+            # The lags add up; clamp so two large lags can't push the bridge past MAX_LAG and
+            # turn a plain delete into a validation error. The clamp moves C earlier than the
+            # chain did, so it is reported, not silent.
+            lag = a.lag + b.lag
+            if lag > MAX_LAG:
+                clamped += 1
+                if clamped <= LAG_WARNINGS_PER_DELETE:
+                    warnings.append(
+                        f"Задержка связи №{pred} → №{succ} после удаления №{deleted_id} "
+                        f"обрезана до {MAX_LAG} дней (было бы {lag})"
+                    )
+                lag = MAX_LAG
+            current = deps.get((pred, succ))
+            if current is None and len(deps) >= MAX_DEPENDENCIES:
+                raise OperationError(f"В плане не может быть больше {MAX_DEPENDENCIES} связей")
+            if current is None or lag > current.lag:  # as _upsert_dep: the larger lag wins
+                deps[(pred, succ)] = Dependency(predecessor_id=pred, successor_id=succ, lag=lag)
+    plan.dependencies = list(deps.values())
+    if clamped > LAG_WARNINGS_PER_DELETE:
+        warnings.append(
+            f"Ещё связей с задержкой, обрезанной до {MAX_LAG} дней после удаления "
+            f"№{deleted_id}: {clamped - LAG_WARNINGS_PER_DELETE}"
+        )
 
 
 def _constraint_warnings(after: ScheduledPlan, moved: list[int]) -> list[str]:

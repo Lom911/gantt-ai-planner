@@ -218,3 +218,21 @@ async def test_operations_with_stale_expected_version_get_409(session_client):
     assert r.status_code == 200 and r.json()["version"] == 1
     r = await session_client.post("/api/plan/redo", json={"expected_version": 1})
     assert r.status_code == 200 and r.json()["version"] == 2
+
+
+async def test_clamped_bridge_lag_is_reported_in_apply_warnings(session_client):
+    # A chain №26 → №27 → №28 with a 365-day lag on each link, appended to the 25-task seed.
+    chain = [
+        {"op": "add_task", "name": "A", "duration": 1},
+        {"op": "add_task", "name": "B", "duration": 1, "predecessors": [{"id": 26, "lag": 365}]},
+        {"op": "add_task", "name": "C", "duration": 1, "predecessors": [{"id": 27, "lag": 365}]},
+    ]
+    r = await session_client.post("/api/plan/operations", json={"ops": chain})
+    assert r.status_code == 200 and r.json()["warnings"] == []
+    r = await session_client.post(
+        "/api/plan/operations", json={"ops": [{"op": "delete_task", "id": 27}]}
+    )
+    assert r.status_code == 200
+    assert r.json()["warnings"] == [
+        "Задержка связи №26 → №28 после удаления №27 обрезана до 365 дней (было бы 730)"
+    ]
