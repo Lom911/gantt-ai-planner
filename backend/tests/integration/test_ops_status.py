@@ -38,6 +38,8 @@ async def test_status_document(app, client, tmp_path):
     status_file = tmp_path / "backup-status"
     status_file.write_text(
         "timestamp=2026-09-27T03:15:04Z\nstatus=ok\nlast_ok=2026-09-27T03:15:04Z\n"
+        "offsite_status=fail\noffsite_last_ok=2026-09-25T03:16:00Z\n"
+        "offsite_file=dumps/2026-09-25.dump.cms\n"
     )
     cfg.backup_status_file = str(status_file)
     app.state.request_metrics._samples.clear()
@@ -76,6 +78,10 @@ async def test_status_document(app, client, tmp_path):
     assert body["backup"]["status"] == "ok"
     assert body["backup"]["last_ok"] == "2026-09-27T03:15:04Z"
     assert isinstance(body["backup"]["age_hours"], float)
+    # The local dump succeeded, its offsite copy didn't: reported next to it for the alert.
+    offsite = body["backup"]["offsite"]
+    assert offsite["status"] == "fail" and offsite["last_ok"] == "2026-09-25T03:16:00Z"
+    assert offsite["age_hours"] > body["backup"]["age_hours"]
     # The monitor's own polling doesn't count either.
     again = (await client.get("/api/ops/status", headers=_auth())).json()
     assert again["requests"] == 4
@@ -86,7 +92,8 @@ async def test_backup_status_file_default_and_unknown(app, client, tmp_path):
     app.state.settings.ops_token = SecretStr(TOKEN)
     app.state.settings.backup_status_file = str(tmp_path / "missing")
     body = (await client.get("/api/ops/status", headers=_auth())).json()
-    assert body["backup"] == {"status": "unknown", "last_ok": None, "age_hours": None}
+    unknown = {"status": "unknown", "last_ok": None, "age_hours": None}
+    assert body["backup"] == {**unknown, "offsite": unknown}
 
 
 def test_ops_token_is_read_from_the_secrets_dir(tmp_path):

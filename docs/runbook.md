@@ -682,7 +682,8 @@ tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод за
 этот файл (каталог `/var/lib/gantt-planner` смонтирован в `app` только
 для чтения) и отдаёт итог в `GET /api/ops/status`; workflow `Uptime`
 поднимает алерт, если бэкап упал, его статус неизвестен или свежайшему
-хорошему дампу больше 30 часов (раздел 6).
+хорошему дампу больше 30 часов (раздел 6). Строки `offsite_*` в том же
+файле пишет офсайт-копия (ниже), они отдаются как `backup.offsite`.
 
 Снапшоты `pre-deploy-*.dump` (раздел 2) лежат в том же каталоге и
 годятся для восстановления так же, как ночные.
@@ -742,8 +743,10 @@ docker compose -f compose.prod.yml exec -T db psql -U postgres -c \
 `offsite not configured` и выходит с кодом 0 — локальный бэкап всё равно
 считается успешным. Сбой офсайт-копии тоже не делает ночной бэкап
 неуспешным (он записан как `offsite_status=fail` и предупреждение в
-журнале `gantt-planner-backup`); застой ловит проверка восстановления
-(ниже): она падает, если свежайшей копии больше 3 дней. Платного
+журнале `gantt-planner-backup`), но поднимает алерт `Uptime` — как и
+копия старше 30 часов (раздел 6); `not_configured` алерта не даёт.
+Вдобавок застой ловит проверка восстановления (ниже): она падает, если
+свежайшей копии больше 3 дней. Платного
 хранилища не нужно: приватный репозиторий и Actions (≈2 минуты в неделю
 из бесплатных 2000 в месяц) бесплатны.
 
@@ -913,7 +916,10 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
 - `GET /api/ops/status` с заголовком `Authorization: Bearer <OPS_TOKEN>`
   (секрет репозитория `OPS_TOKEN` = `/opt/gantt-planner/secrets/ops_token`)
   — внутренние метрики приложения. Ответ:
-  `{"window_minutes":15,"requests":…,"errors_5xx":…,"error_rate":…,"p95_ms":…,"tokens_today":…,"chat_messages_today":…,"disk_free_ratio":…,"backup":{"status":"ok|fail|unknown","last_ok":…,"age_hours":…}}`.
+  `{"window_minutes":15,"requests":…,"errors_5xx":…,"error_rate":…,"p95_ms":…,"tokens_today":…,"chat_messages_today":…,"disk_free_ratio":…,"backup":{"status":"ok|fail|unknown","last_ok":…,"age_hours":…,"offsite":{"status":"ok|fail|not_configured|unknown","last_ok":…,"age_hours":…}}}`.
+  `backup.offsite` — `null`, если строк `offsite_*` в `backup-status` нет
+  вовсе (офсайт-копия на этом сервере ещё ни разу не запускалась);
+  `unknown` — строки есть, но без понятного `offsite_status`.
   Алерт, если:
 
   | условие | смысл |
@@ -925,9 +931,14 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
   | `backup.status == "fail"` | последний ночной бэкап упал |
   | `backup.status == "unknown"` | приложение не может прочитать `backup-status` |
   | `backup.age_hours > 30` | свежайшему хорошему дампу больше 30 часов |
+  | `backup.offsite.status == "fail"` | зашифрованная копия не ушла в репозиторий бэкапов (локальный дамп при этом может быть в порядке) |
+  | `backup.offsite.status == "unknown"` | строки `offsite_*` испорчены (при нечитаемом файле хватает алерта `backup.status`) |
+  | `backup.offsite.age_hours > 30` | свежайшей офсайт-копии больше 30 часов (кроме `not_configured`) |
 
-  А также `401/403` (секрет `OPS_TOKEN` не совпадает с файлом на
-  сервере), другой код или тело не того формата. Без секрета `OPS_TOKEN`
+  `not_configured` и `null` алерта не дают: офсайт-копия включается
+  отдельной настройкой сервера (раздел 4). А также `401/403` (секрет
+  `OPS_TOKEN` не совпадает с файлом на сервере), другой код или тело не
+  того формата. Без секрета `OPS_TOKEN`
   проверка метрик пропускается с notice; `404` значит, что эндпоинт ещё
   не задеплоен, — тоже notice, не алерт.
 
@@ -973,6 +984,10 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
      `cat /var/lib/gantt-planner/backup-status`); `unknown` — файла нет
      или он не смонтирован в `app` (`docker compose … exec app cat
      /var/lib/gantt-planner/backup-status`);
+   - офсайт-копия — `journalctl -t gantt-planner-offsite --since -2d` и
+     `grep '^offsite_' /var/lib/gantt-planner/backup-status`; после
+     исправления (раздел 4, «Офсайт-копии») запустить
+     `sudo /usr/local/bin/gantt-planner-offsite-backup.sh` вручную;
    - `401/403` — секрет `OPS_TOKEN` в GitHub не совпадает с
      `secrets/ops_token` (раздел 3, «Токен ops-эндпоинта»).
 5. Issue закроется сам на следующей успешной проверке (или запустить
