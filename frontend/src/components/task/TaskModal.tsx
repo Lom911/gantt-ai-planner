@@ -3,9 +3,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
 import type { PlanResponse, ScheduledPlan, ScheduledTask } from "@/api/types";
+import { useMeta } from "@/hooks/useMeta";
 import { cachedPlanVersion, PLAN_KEY, refetchOnConflict } from "@/hooks/usePlan";
 import { formatRu } from "@/lib/dates";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { taskLimitNotice } from "./newTaskOps";
 import {
   buildTaskOps,
   describeConflict,
@@ -53,6 +55,7 @@ export function TaskModal({
   disabled: boolean;
 }) {
   const queryClient = useQueryClient();
+  const { data: meta } = useMeta();
   // `baseline` is the form as last known from the server (i.e. `formFromTask` of the task the
   // form was seeded/rebased from); `form` is what's shown in the inputs. Diffing `form` against
   // `baseline` (not the live `task` directly) in `buildTaskOps` means a server-side change to a
@@ -120,6 +123,8 @@ export function TaskModal({
   const confirmingDelete = confirmDeleteId === task.id;
   const fresh = formFromTask(task);
   const conflicts = findConflicts(form, baseline, fresh);
+  // At the plan's task limit «Добавить после» would only open a form the server refuses.
+  const limitNotice = taskLimitNotice(plan, meta?.max_tasks);
 
   // `base` is what the form is diffed against: «Сохранить моё» passes a baseline that has already
   // taken the server's value of the conflicting fields, so the user's value is sent over it.
@@ -393,7 +398,8 @@ export function TaskModal({
               <button
                 type="button"
                 className="rounded-md px-2 py-1.5 text-sm hover:bg-accent disabled:opacity-50"
-                disabled={disabled}
+                disabled={disabled || limitNotice != null}
+                title={limitNotice ?? undefined}
                 onClick={() => onAddAfter(task.id)}
               >
                 Добавить после

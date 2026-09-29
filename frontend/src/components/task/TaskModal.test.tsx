@@ -7,7 +7,9 @@ import { TaskModal } from "./TaskModal";
 
 vi.mock("@/api/client", async () => {
   const actual = await vi.importActual<typeof import("@/api/client")>("@/api/client");
-  return { ...actual, api: { applyOps: vi.fn(), taskHistory: vi.fn() } };
+  // The card reads the plan's task limit from GET /api/meta («Добавить после»).
+  const meta = vi.fn().mockResolvedValue({ llm_mode: "fake", model: "fake", max_tasks: 500 });
+  return { ...actual, api: { applyOps: vi.fn(), taskHistory: vi.fn(), meta } };
 });
 
 const task: ScheduledTask = {

@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { clearLayoutPrefs } from "@/lib/layoutPrefs";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { McpConnectDialog } from "@/components/McpConnectDialog";
+import { taskLimitNotice } from "@/components/task/newTaskOps";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -80,14 +81,16 @@ export function Toolbar({
   };
 
   const busy = agentBusy || pending;
+  // At the plan's task limit the form would only end in the server's refusal.
+  const limitNotice = taskLimitNotice(plan.plan, meta?.max_tasks);
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
       <button
         type="button"
-        title="Добавить задачу"
+        title={limitNotice ?? "Добавить задачу"}
         aria-label="Добавить задачу"
-        disabled={busy}
+        disabled={busy || limitNotice != null}
         className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50 sm:px-3"
         onClick={onAddTask}
       >

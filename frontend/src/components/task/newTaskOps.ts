@@ -1,4 +1,5 @@
 import type { AddTaskOp, Operation, ScheduledPlan } from "@/api/types";
+import { ruPlural } from "@/lib/resourceSummary";
 import { validateTaskForm, type TaskForm } from "./taskOps";
 
 // The new-task form: the task's own fields (as in the task modal) plus where it goes.
@@ -24,6 +25,41 @@ export function emptyNewTaskForm(anchorId: number | null): NewTaskForm {
     predecessorId: anchorId,
     successorId: null,
   };
+}
+
+// The form fields that point at an existing task.
+export type AnchorField = "predecessorId" | "successorId" | "afterId";
+const ANCHOR_FIELDS: AnchorField[] = ["predecessorId", "successorId", "afterId"];
+
+// The form stays open while the plan moves on: the agent or another tab can delete a task it
+// points at, and the server would refuse the batch only after the user filled everything in.
+// Returns the form with every such selection cleared plus which task each field had, or null
+// when all of them are still in the plan.
+export function dropDeletedAnchors(
+  plan: ScheduledPlan,
+  form: NewTaskForm,
+): { form: NewTaskForm; deleted: Partial<Record<AnchorField, number>> } | null {
+  const ids = new Set(plan.tasks.map((t) => t.id));
+  const next = { ...form };
+  const deleted: Partial<Record<AnchorField, number>> = {};
+  for (const field of ANCHOR_FIELDS) {
+    const id = form[field];
+    if (id == null || ids.has(id)) continue;
+    next[field] = null;
+    deleted[field] = id;
+  }
+  return Object.keys(deleted).length > 0 ? { form: next, deleted } : null;
+}
+
+export function deletedAnchorNotice(id: number): string {
+  return `Задачу №${id} удалили, пока форма была открыта — выберите другую`;
+}
+
+// The backend refuses a plan over `maxTasks` (GET /api/meta, backend MAX_TASKS). Null while
+// there's still room, and while meta hasn't loaded — the server enforces the limit regardless.
+export function taskLimitNotice(plan: ScheduledPlan, maxTasks: number | undefined): string | null {
+  if (maxTasks == null || plan.tasks.length < maxTasks) return null;
+  return `В плане уже ${maxTasks} ${ruPlural(maxTasks, "задача", "задачи", "задач")} — это предел`;
 }
 
 // One atomic batch. The new task's id is `last_id + 1` — the backend numbers add_task that way

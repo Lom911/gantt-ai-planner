@@ -12,6 +12,7 @@ from asgi_lifespan import LifespanManager
 from pydantic import SecretStr
 
 from app.config import Settings
+from app.domain.models import MAX_TASKS
 from app.main import create_app
 from tests.integration.conftest import TEST_DB_URL, TODAY
 
@@ -19,7 +20,14 @@ from tests.integration.conftest import TEST_DB_URL, TODAY
 async def test_meta_reports_fake_mode_with_no_model_by_default(client):
     r = await client.get("/api/meta")
     assert r.status_code == 200
-    assert r.json() == {"llm_mode": "fake", "model": None}
+    assert r.json() == {"llm_mode": "fake", "model": None, "max_tasks": MAX_TASKS}
+
+
+async def test_meta_reports_the_plan_task_limit(client):
+    # The UI disables «Добавить задачу» at this many tasks instead of letting the user fill in
+    # a form the server would refuse; it must be the same number the domain enforces.
+    r = await client.get("/api/meta")
+    assert r.json()["max_tasks"] == MAX_TASKS == 500
 
 
 async def test_meta_requires_no_session(client):
@@ -44,7 +52,11 @@ async def test_meta_reports_anthropic_mode_and_model_when_key_is_configured(sess
         ) as anthropic_client:
             r = await anthropic_client.get("/api/meta")
     assert r.status_code == 200
-    assert r.json() == {"llm_mode": "anthropic", "model": "claude-sonnet-5"}
+    assert r.json() == {
+        "llm_mode": "anthropic",
+        "model": "claude-sonnet-5",
+        "max_tasks": MAX_TASKS,
+    }
 
 
 async def test_meta_reports_fake_mode_when_key_is_blank(sessionmaker):
@@ -62,4 +74,4 @@ async def test_meta_reports_fake_mode_when_key_is_blank(sessionmaker):
         ) as fake_client:
             r = await fake_client.get("/api/meta")
     assert r.status_code == 200
-    assert r.json() == {"llm_mode": "fake", "model": None}
+    assert r.json() == {"llm_mode": "fake", "model": None, "max_tasks": MAX_TASKS}
