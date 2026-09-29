@@ -106,17 +106,22 @@ jobs:
             echo "::notice title=N-1 migration check skipped::no base commit for this event ('${BASE_SHA}')"
             exit 0
           fi
-          ref="ghcr.io/alomaev-hue/gantt-ai-planner:sha-${BASE_SHA:0:7}"
-          if ! err="$(docker buildx imagetools inspect "$ref" 2>&1 >/dev/null)"; then
-            if grep -qiE 'not found|no such manifest|manifest unknown' <<< "$err"; then
-              echo "::notice title=N-1 migration check skipped::$ref does not exist (the base commit was never released)"
+          # Releases before the repo moved to Lom911 (2026-09-29) were published under
+          # alomaev-hue. Until its first release the new package doesn't exist at all, and GHCR
+          # answers that with a 403 on the anonymous token rather than "not found".
+          for repo in ghcr.io/lom911/gantt-ai-planner ghcr.io/alomaev-hue/gantt-ai-planner; do
+            ref="$repo:sha-${BASE_SHA:0:7}"
+            if err="$(docker buildx imagetools inspect "$ref" 2>&1 >/dev/null)"; then
+              docker pull -q "$ref"
+              echo "image=$ref" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::error::could not look up $ref: $err"
-            exit 1
-          fi
-          docker pull -q "$ref"
-          echo "image=$ref" >> "$GITHUB_OUTPUT"
+            if ! grep -qiE 'not found|no such manifest|manifest unknown|anonymous token.*403' <<< "$err"; then
+              echo "::error::could not look up $ref: $err"
+              exit 1
+            fi
+          done
+          echo "::notice title=N-1 migration check skipped::no image sha-${BASE_SHA:0:7} (the base commit was never released)"
       - name: N-1 migration check (new migrations, previous app)
         if: ${{ !cancelled() && steps.prev.outputs.image != '' }}
         env:

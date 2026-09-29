@@ -12,7 +12,7 @@
 
 **Что сдаём** (всё обязательно, в урезание не попадает):
 
-1. Публичный репозиторий `github.com/alomaev-hue/gantt-ai-planner`.
+1. Публичный репозиторий `github.com/Lom911/gantt-ai-planner`.
 2. Развёрнутое приложение: `https://gantt-ai-planner.duckdns.org`.
 3. README: как запустить, архитектура, принятые решения, отдельный раздел об использовании AI-ассистентов.
 4. Демо-gif и mp4 основного сценария: загрузка Excel → правка через чат → экспорт.
@@ -433,7 +433,7 @@ mcp_tokens    (id uuid pk, session_id fk cascade, token_hash bytea unique,
   - `db` — postgres:17-alpine, данные в `/var/lib/gantt-planner/pg`, сеть `backend` (`internal: true`), `initdb.d/10-roles.sh` создаёт роли, healthcheck;
   - `migrate` — тот же образ приложения, `alembic upgrade head` от `planner_owner`, запускается один раз при каждом деплое;
   - `app` — FastAPI отдаёт собранный SPA, uvicorn с 1 воркером, сети `backend` и `edge`, стартует после `service_completed_successfully` сервиса `migrate`.
-- **Образ.** Один multi-stage Dockerfile: `node:20` собирает фронтенд, `python:3.12-slim` с uv ставит бэкенд, итоговый образ slim без инструментов сборки. Публикуется в `ghcr.io/alomaev-hue/gantt-ai-planner` как публичный пакет с тегами `sha-<short>` и `latest`.
+- **Образ.** Один multi-stage Dockerfile: `node:20` собирает фронтенд, `python:3.12-slim` с uv ставит бэкенд, итоговый образ slim без инструментов сборки. Публикуется в `ghcr.io/lom911/gantt-ai-planner` как публичный пакет с тегами `sha-<short>` и `latest`.
 - **CI** (`ci.yml`, на PR и push):
   - ruff, format-check, mypy (strict для `domain/` и `excel/`);
   - pytest с Postgres в service container;

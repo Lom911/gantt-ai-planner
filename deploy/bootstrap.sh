@@ -359,7 +359,7 @@ main() {
     echo "         and copy $SECRETS_DIR/ops_token into the GitHub Actions secret OPS_TOKEN"
     echo "      3. point the gantt-ai-planner.duckdns.org A record at this host's IP"
     echo "      4. run the first deploy manually with a digest-pinned ref (docs/runbook.md section 1);"
-    echo "         the digest: docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<commit> --format '{{json .Manifest}}'"
+    echo "         the digest: docker buildx imagetools inspect ghcr.io/lom911/gantt-ai-planner:sha-<commit> --format '{{json .Manifest}}'"
     echo "         echo 'IMAGE_TAG=sha-<commit>@sha256:<digest>' >> $APP_DIR/.env"
     echo "         cd $APP_DIR && docker compose -f compose.prod.yml pull && docker compose -f compose.prod.yml up -d"
 }
