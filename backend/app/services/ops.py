@@ -74,29 +74,52 @@ def _parse_moment(raw: str | None) -> datetime | None:
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
-def read_backup_status(path: str, now: datetime) -> dict[str, Any]:
-    """The nightly backup's status file (written by deploy/backup.sh: `key=value` lines —
-    timestamp, status=ok|fail, last_ok, ...) as {status, last_ok, age_hours}. A missing,
-    unreadable or garbled file is status "unknown": the alert should fire on that too."""
-    unknown: dict[str, Any] = {"status": "unknown", "last_ok": None, "age_hours": None}
-    try:
-        with open(Path(path), "rb") as fh:
-            raw = fh.read(_BACKUP_STATUS_MAX_BYTES).decode("utf-8", errors="replace")
-    except OSError:
-        return unknown
-    fields: dict[str, str] = {}
-    for line in raw.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            fields[key.strip()] = value.strip()
-    status = fields.get("status")
-    if status not in ("ok", "fail"):
-        return unknown
-    last_ok = _parse_moment(fields.get("last_ok"))
-    if last_ok is None and status == "ok":
-        last_ok = _parse_moment(fields.get("timestamp"))  # this very run succeeded
+def _backup_state(status: str, last_ok: datetime | None, now: datetime) -> dict[str, Any]:
     return {
         "status": status,
         "last_ok": iso_utc(last_ok) if last_ok else None,
         "age_hours": round((now - last_ok).total_seconds() / 3600, 2) if last_ok else None,
     }
+
+
+def _local_backup(fields: dict[str, str], now: datetime) -> dict[str, Any]:
+    status = fields.get("status")
+    if status not in ("ok", "fail"):
+        return _backup_state("unknown", None, now)
+    last_ok = _parse_moment(fields.get("last_ok"))
+    if last_ok is None and status == "ok":
+        last_ok = _parse_moment(fields.get("timestamp"))  # this very run succeeded
+    return _backup_state(status, last_ok, now)
+
+
+def _offsite_backup(fields: dict[str, str], now: datetime) -> dict[str, Any] | None:
+    # No offsite_* line at all: the offsite copy has never run against this file (the script
+    # isn't installed, or the file predates it) - None, which the alert skips, like an offsite
+    # copy the server isn't configured for. Lines that are there but garbled are "unknown".
+    if not any(key.startswith("offsite_") for key in fields):
+        return None
+    status = fields.get("offsite_status")
+    if status not in ("ok", "fail", "not_configured"):
+        return _backup_state("unknown", None, now)
+    return _backup_state(status, _parse_moment(fields.get("offsite_last_ok")), now)
+
+
+def read_backup_status(path: str, now: datetime) -> dict[str, Any]:
+    """The nightly backup's status file as {status, last_ok, age_hours, offsite}. Written by
+    deploy/backup.sh (`key=value` lines: timestamp, status=ok|fail, last_ok, ...) and by
+    deploy/offsite-backup.sh (offsite_status=ok|fail|not_configured, offsite_last_ok, ...),
+    whose part is `offsite` in the same {status, last_ok, age_hours} shape. A missing,
+    unreadable or garbled file is status "unknown": the alert should fire on that too."""
+    try:
+        with open(Path(path), "rb") as fh:
+            raw = fh.read(_BACKUP_STATUS_MAX_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        unknown = _backup_state("unknown", None, now)
+        return {**unknown, "offsite": dict(unknown)}
+    fields: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip()
+    # Parsed apart: two scripts write the file, broken lines of one don't hide the other's.
+    return {**_local_backup(fields, now), "offsite": _offsite_backup(fields, now)}
