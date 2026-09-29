@@ -667,6 +667,20 @@ gantt-planner-backup.service`): `pg_dump -Fc` от `planner_owner` в
 `/var/backups/gantt-planner/<дата>.dump`, дампы старше 7 дней удаляются.
 Пустой вывод `pg_dump` считается ошибкой и не затирает хороший дамп.
 
+Деплой юниты таймера не ставит — только `bootstrap.sh`. На хосте, настроенном
+до 29.09.2026, остался cron-файл, который никогда не срабатывал (cron-демона
+нет). Такому хосту нужен повторный `sudo bash deploy/bootstrap.sh`
+(идемпотентен) или то же вручную:
+
+```bash
+install -m 0644 deploy/systemd/gantt-planner-backup.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now gantt-planner-backup.timer
+rm -f /etc/cron.d/gantt-planner-backup
+systemctl start gantt-planner-backup.service   # сразу проверить: backup-status → ok
+```
+
+На проде это сделано 29.09.2026.
+
 Сбой бэкапа не проходит молча — каждый запуск оставляет след:
 
 ```bash
@@ -919,7 +933,8 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
   `{"window_minutes":15,"requests":…,"errors_5xx":…,"error_rate":…,"p95_ms":…,"tokens_today":…,"chat_messages_today":…,"disk_free_ratio":…,"backup":{"status":"ok|fail|unknown","last_ok":…,"age_hours":…,"offsite":{"status":"ok|fail|not_configured|unknown","last_ok":…,"age_hours":…}}}`.
   `backup.offsite` — `null`, если строк `offsite_*` в `backup-status` нет
   вовсе (офсайт-копия на этом сервере ещё ни разу не запускалась);
-  `unknown` — строки есть, но без понятного `offsite_status`.
+  `unknown` — строки есть, но без понятного `offsite_status` или, при `ok`, без читаемого
+  `offsite_last_ok` (у `ok` без времени нет возраста, и он никогда не устарел бы).
   Алерт, если:
 
   | условие | смысл |
@@ -929,7 +944,7 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
   | `tokens_today > 3000000` | за сутки потрачено больше 3 млн токенов LLM (расходы) |
   | `disk_free_ratio < 0.10` | свободно меньше 10 % диска |
   | `backup.status == "fail"` | последний ночной бэкап упал |
-  | `backup.status == "unknown"` | приложение не может прочитать `backup-status` |
+  | `backup.status == "unknown"` | приложение не может прочитать `backup-status`, или в нём нет понятного статуса либо времени удачного запуска |
   | `backup.age_hours > 30` | свежайшему хорошему дампу больше 30 часов |
   | `backup.offsite.status == "fail"` | зашифрованная копия не ушла в репозиторий бэкапов (локальный дамп при этом может быть в порядке) |
   | `backup.offsite.status == "unknown"` | строки `offsite_*` испорчены (при нечитаемом файле хватает алерта `backup.status`) |

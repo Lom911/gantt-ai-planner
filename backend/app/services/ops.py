@@ -75,6 +75,10 @@ def _parse_moment(raw: str | None) -> datetime | None:
 
 
 def _backup_state(status: str, last_ok: datetime | None, now: datetime) -> dict[str, Any]:
+    # "ok" without a moment has no age to go stale and would never alert: a garbled file must
+    # not look healthy (both scripts always write the time of a good run).
+    if status == "ok" and last_ok is None:
+        status = "unknown"
     return {
         "status": status,
         "last_ok": iso_utc(last_ok) if last_ok else None,

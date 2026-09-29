@@ -213,15 +213,27 @@ def test_missing_backup_status_is_unknown(tmp_path):
     assert read_backup_status(str(tmp_path / "nope"), NOW) == {**UNKNOWN, "offsite": UNKNOWN}
 
 
-def test_unparseable_last_ok_is_dropped_not_fatal(tmp_path):
+def test_ok_without_a_readable_moment_is_unknown(tmp_path):
+    # "ok" with no parseable time has no age to go stale, so it would never alert: a garbled
+    # file must not look healthy. Both scripts always write the moment of a good run.
     path = _status_file(
         tmp_path,
         "status=ok\nlast_ok=yesterday\ntimestamp=also-bad\n"
         "offsite_status=ok\noffsite_last_ok=today\n",
     )
-    assert read_backup_status(path, NOW) == {
-        "status": "ok",
+    assert read_backup_status(path, NOW) == {**UNKNOWN, "offsite": UNKNOWN}
+
+
+def test_offsite_ok_without_last_ok_is_unknown(tmp_path):
+    path = _status_file(tmp_path, LOCAL_OK + "offsite_status=ok\noffsite_file=dumps/x.dump.cms\n")
+    assert read_backup_status(path, NOW)["offsite"] == UNKNOWN
+
+
+def test_failed_run_without_last_ok_stays_failed(tmp_path):
+    # Never succeeded: no good moment to report, but "fail" alerts by itself.
+    path = _status_file(tmp_path, LOCAL_OK + "offsite_status=fail\noffsite_last_ok=\n")
+    assert read_backup_status(path, NOW)["offsite"] == {
+        "status": "fail",
         "last_ok": None,
         "age_hours": None,
-        "offsite": {"status": "ok", "last_ok": None, "age_hours": None},
     }

@@ -159,13 +159,13 @@ jobs:
             (if .backup.status == "fail" then
               "- the last nightly backup FAILED (newest good one: \(.backup.last_ok // "never"))" else empty end),
             (if .backup.status == "unknown" then
-              "- nightly backup status unknown: the app cannot read /var/lib/gantt-planner/backup-status" else empty end),
+              "- nightly backup status unknown: /var/lib/gantt-planner/backup-status is unreadable or has no valid status/time" else empty end),
             (if .backup.age_hours != null and .backup.age_hours > 30 then
               "- the newest good backup is \(.backup.age_hours | round) h old (> 30 h)" else empty end),
             (if .backup.offsite.status == "fail" then
               "- the last offsite copy FAILED: the dump did not reach the backups repository (newest good copy: \(.backup.offsite.last_ok // "never"))" else empty end),
             (if .backup.offsite.status == "unknown" and .backup.status != "unknown" then
-              "- offsite copy status unknown: no valid offsite_status in /var/lib/gantt-planner/backup-status" else empty end),
+              "- offsite copy status unknown: no valid offsite_status/offsite_last_ok in /var/lib/gantt-planner/backup-status" else empty end),
             (if .backup.offsite.status != "not_configured" and .backup.offsite.age_hours != null
                 and .backup.offsite.age_hours > 30 then
               "- the newest offsite copy is \(.backup.offsite.age_hours | round) h old (> 30 h)" else empty end)
