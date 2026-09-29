@@ -172,7 +172,8 @@ export function TaskModal({
   const handleTakeTheirs = () => setState({ ...state, ...resolveConflicts(form, baseline, fresh, "theirs"), error: null });
 
   // Its links are kept: the backend reconnects every predecessor to every successor (A→B→C
-  // becomes A→C), so the rest of the chain keeps its order. Undo brings the task back.
+  // becomes A→C), so the rest of the chain keeps its order. Undo brings the task back. The
+  // bridged lag is the sum of the two, capped at 365 days — the backend warns when it cuts one.
   const handleDelete = async () => {
     setSaving(true);
     setError(null);
@@ -180,6 +181,7 @@ export function TaskModal({
       const res = await api.applyOps([{ op: "delete_task", id: task.id }], cachedPlanVersion(queryClient));
       queryClient.setQueryData(PLAN_KEY, res);
       toast.success(res.summary);
+      res.warnings.forEach((warning) => toast.warning(warning));
       onOpenChange(false);
     } catch (err) {
       refetchOnConflict(queryClient, err);
