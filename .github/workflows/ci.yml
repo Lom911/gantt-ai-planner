@@ -78,7 +78,7 @@ jobs:
         with: { node-version: 26, cache: npm, cache-dependency-path: frontend/package-lock.json }
       - run: npm ci && npx playwright install --with-deps chromium && npm run e2e
         working-directory: frontend
-      # Load gate (docs/load-testing.md): a short run on the same stack; fails on more than 1%
+      # Load gate: a short run on the same stack; fails on more than 1%
       # errors, counting chat turns that end in an SSE `error` event. No latency threshold
       # here — shared CI runners are too noisy for one; latency is measured on the VPS stand.
       - name: Load test gate
@@ -91,7 +91,7 @@ jobs:
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with: { name: playwright-report, path: frontend/test-results }
-      # N-1 migration compatibility (docs/runbook.md section 2): a failed deploy rolls back
+      # N-1 migration compatibility: a failed deploy rolls back
       # to the previous image WITHOUT undoing migrations, so the previous release must run on
       # the schema this commit migrates to. The previous release = the image of the base
       # commit (PR base / the commit before this push). Runs even if the browser tests failed.

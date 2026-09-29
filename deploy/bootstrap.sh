@@ -72,7 +72,7 @@ step_scripts() {
     echo "    installed $PLANNER_DEPLOY_BIN, $PLANNER_DEPLOY_WRAPPER_BIN, $BACKUP_BIN, $OFFSITE_BIN"
 }
 
-# Offsite backups (deploy/offsite-backup.sh, docs/runbook.md section 4): only the
+# Offsite backups (deploy/offsite-backup.sh): only the
 # directory and the pinned github.com host key are installed here. The repository
 # settings, the public certificate and the deploy key are created by hand; until all
 # three exist the nightly backup stays local ("offsite not configured").
@@ -93,7 +93,7 @@ step_offsite() {
         echo "    offsite backups configured"
     else
         echo "    offsite backups NOT configured yet (missing: ${missing[*]});"
-        echo "    nightly backups stay local until then - setup: docs/runbook.md section 4"
+        echo "    nightly backups stay local until then - see deploy/offsite/offsite.conf.example"
     fi
 }
 
@@ -145,9 +145,9 @@ step_compose_files() {
     if [ ! -f "$APP_DIR/.env" ]; then
         # No IMAGE_TAG on purpose (no silent `latest`): compose.prod.yml refuses to run
         # without one, and the first release sets an explicit digest-pinned ref by hand
-        # (docs/runbook.md section 1); planner-deploy maintains it from then on.
+        # (step 4 of the notes main prints at the end); planner-deploy maintains it from then on.
         (umask 177 && printf '%s\n' \
-            '# IMAGE_TAG=sha-<commit>@sha256:<digest>  <- added by the first manual deploy (docs/runbook.md section 1)' \
+            '# IMAGE_TAG=sha-<commit>@sha256:<digest>  <- added by the first manual deploy' \
             'LLM_PROVIDER=openrouter' \
             'LLM_MODEL=anthropic/claude-sonnet-5' > "$APP_DIR/.env")
         chmod 0600 "$APP_DIR/.env"
@@ -217,8 +217,7 @@ EOF
     echo "    Caddy is attached to 'planner-proxy' and proxies to planner-app:8000"
     if ! printf '%s\n' "$config" | grep -q '^    read_only: true$'; then
         echo "    NOTE: Caddy runs without the hardening from deploy/caddy/compose.yml (read_only,"
-        echo "    cap_drop ALL + NET_BIND_SERVICE, no-new-privileges, pids_limit); merge it by hand"
-        echo "    (docs/runbook.md section 1, 'Существующий стек Caddy')."
+        echo "    cap_drop ALL + NET_BIND_SERVICE, no-new-privileges, pids_limit); merge it by hand."
     fi
 }
 
@@ -368,7 +367,7 @@ main() {
     echo "      2. add the CI deploy key to /home/$DEPLOY_USER/.ssh/authorized_keys (see step above)"
     echo "         and copy $SECRETS_DIR/ops_token into the GitHub Actions secret OPS_TOKEN"
     echo "      3. point the gantt-ai-planner.duckdns.org A record at this host's IP"
-    echo "      4. run the first deploy manually with a digest-pinned ref (docs/runbook.md section 1);"
+    echo "      4. run the first deploy manually with a digest-pinned ref;"
     echo "         the digest: docker buildx imagetools inspect ghcr.io/lom911/gantt-ai-planner:sha-<commit> --format '{{json .Manifest}}'"
     echo "         echo 'IMAGE_TAG=sha-<commit>@sha256:<digest>' >> $APP_DIR/.env"
     echo "         cd $APP_DIR && docker compose -f compose.prod.yml pull && docker compose -f compose.prod.yml up -d"

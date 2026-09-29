@@ -5,8 +5,8 @@ name: Restore check
 # NOT a workflow of gantt-ai-planner itself: copy this file to
 # .github/workflows/restore-check.yml of the PRIVATE backups repository that
 # gantt-planner-offsite-backup.sh (deploy/offsite-backup.sh) pushes to, and set that
-# repository's Actions secret BACKUP_PRIVATE_KEY to the contents of backup-private.pem
-# (docs/runbook.md section 4). The private key exists only there and offline.
+# repository's Actions secret BACKUP_PRIVATE_KEY to the contents of backup-private.pem.
+# The private key exists only there and offline.
 #
 # - decrypts the newest dumps/*.cms with `openssl cms -decrypt`;
 # - restores it with pg_restore into a throwaway postgres:17-alpine service (the
@@ -152,7 +152,6 @@ jobs:
               echo
               cat "$details"
               echo
-              echo 'Runbook: gantt-ai-planner docs/runbook.md, section 4 (offsite backups).'
             } > "$report"
           else
             ok=true

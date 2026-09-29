@@ -10,7 +10,7 @@ name: Uptime
 # - all fine -> closes any open `uptime` issue with a recovery comment.
 # Scheduled runs only happen on the default branch and may start late when Actions is
 # busy; GitHub disables schedules after 60 days without repository activity (re-enable in
-# the Actions tab). See docs/runbook.md section 6.
+# the Actions tab).
 
 on:
   schedule:
@@ -103,7 +103,7 @@ jobs:
           problem() { printf -- '- %s\n' "$1" >> "$problems_file"; }
 
           if [ -z "${OPS_TOKEN:-}" ]; then
-            echo "::notice title=Ops check skipped::the OPS_TOKEN secret is not set (docs/runbook.md section 6)"
+            echo "::notice title=Ops check skipped::the OPS_TOKEN secret is not set"
             exit 0
           fi
           # The header goes through a 0600 file, not the command line (visible in ps).
@@ -126,7 +126,7 @@ jobs:
               echo "::notice title=Ops check skipped::$BASE_URL/api/ops/status answers 404 (endpoint not deployed yet)"
               exit 0 ;;
             401 | 403)
-              problem "\`/api/ops/status\`: HTTP $code - the OPS_TOKEN secret does not match /opt/gantt-planner/secrets/ops_token (docs/runbook.md section 3)"
+              problem "\`/api/ops/status\`: HTTP $code - the OPS_TOKEN secret does not match /opt/gantt-planner/secrets/ops_token"
               exit 0 ;;
             *)
               problem "\`/api/ops/status\`: HTTP $code $(head -c 200 "$RUNNER_TEMP/ops-curl.err" | tr '\n' ' ')"
@@ -138,10 +138,10 @@ jobs:
             exit 0
           fi
           jq -r '"requests=\(.requests) errors_5xx=\(.errors_5xx) error_rate=\(.error_rate) p95_ms=\(.p95_ms) tokens_today=\(.tokens_today) chat_messages_today=\(.chat_messages_today) disk_free_ratio=\(.disk_free_ratio) backup=\(.backup.status) last_ok=\(.backup.last_ok) age_hours=\(.backup.age_hours) offsite=\(.backup.offsite.status) offsite_last_ok=\(.backup.offsite.last_ok) offsite_age_hours=\(.backup.offsite.age_hours)"' "$body"
-          # Thresholds (docs/runbook.md section 6). Null-guarded: in jq, null < 0.1 is true.
+          # Thresholds. Null-guarded: in jq, null < 0.1 is true.
           # The offsite copy alerts on fail, on unknown and past the local dump's 30 h - but
-          # never on not_configured (enabled by a separate server setting, docs/runbook.md
-          # section 4), nor on offsite = null: no offsite_* line in the status file at all, the
+          # never on not_configured (enabled by a separate server setting,
+          # /etc/gantt-planner/offsite.conf), nor on offsite = null: no offsite_* line in the status file at all, the
           # copy has never run there (or the app predates the field). Once it has run, its lines
           # stay in the file, so a copy that stops running still ages into the alert. An
           # unreadable file is already reported as the local backup's "unknown".
@@ -206,7 +206,6 @@ jobs:
                 cat "$ops"
                 echo
               fi
-              printf '%s\n' 'Runbook: docs/runbook.md, section 6 (monitoring and alerts).'
             } > "$report"
           else
             alert=false

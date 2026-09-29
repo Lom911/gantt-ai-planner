@@ -18,7 +18,6 @@
 #     app's only route out (outbound HTTPS to the LLM API: OpenRouter/Anthropic).
 #   The app is deliberately NOT on Caddy's shared `edge` network.
 #
-# See docs/runbook.md for operational procedures.
 
 networks:
   planner-proxy:

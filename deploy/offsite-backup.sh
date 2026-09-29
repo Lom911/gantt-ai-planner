@@ -23,7 +23,7 @@
 # Not configured (offsite.conf, the certificate or the deploy key missing):
 # logs "offsite not configured" and exits 0 - the local backup still counts.
 # Any other failure exits non-zero with offsite_status=fail.
-# Restore by hand and the weekly restore check: docs/runbook.md section 4.
+# The weekly restore check: deploy/offsite/restore-check.yml.
 set -euo pipefail
 
 CONF_DIR=/etc/gantt-planner
@@ -76,7 +76,7 @@ for f in "$CONF_FILE" "$RECIPIENT_CERT" "$DEPLOY_KEY"; do
     [ -r "$f" ] || missing+=("$f")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
-    log notice "offsite not configured (missing: ${missing[*]}); local backup only - see docs/runbook.md section 4"
+    log notice "offsite not configured (missing: ${missing[*]}); local backup only - see deploy/offsite/offsite.conf.example"
     set_status not_configured "$prev_ok" "$prev_file"
     exit 0
 fi

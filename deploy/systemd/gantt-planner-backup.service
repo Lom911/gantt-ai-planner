@@ -11,7 +11,7 @@ After=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/gantt-planner-backup.sh
-# Same log file the cron job wrote to (docs/runbook.md, section 4).
+# Same log file the cron job wrote to.
 StandardOutput=append:/var/log/gantt-planner-backup.log
 StandardError=append:/var/log/gantt-planner-backup.log
 # A dump plus the offsite push takes seconds; never let a hung one hold the unit.
