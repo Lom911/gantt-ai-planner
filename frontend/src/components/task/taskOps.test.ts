@@ -1,4 +1,14 @@
-import { buildTaskOps, formFromTask, needsRebase, rebaseForm, validateTaskForm, type TaskForm } from "./taskOps";
+import {
+  buildTaskOps,
+  describeConflict,
+  findConflicts,
+  formFromTask,
+  needsRebase,
+  rebaseForm,
+  resolveConflicts,
+  validateTaskForm,
+  type TaskForm,
+} from "./taskOps";
 import type { ScheduledTask } from "@/api/types";
 
 const task: ScheduledTask = {
@@ -112,4 +122,88 @@ test("after a rebase the fresh snapshot no longer needs one", () => {
   const rebased = rebaseForm(form, base, fresh);
   expect(rebased.form).toEqual({ ...base, name: "A edited", duration: 5 });
   expect(needsRebase(rebased.form, rebased.baseline, fresh)).toBe(false);
+});
+
+// Conflicts: the user is editing a field and the server (agent, another tab) changed that same
+// field since the user began — `baseline` still holds the value the user started from.
+const opened: TaskForm = { name: "А", description: "", assignee: "Мария", duration: 5, constraint: null };
+
+test("findConflicts reports an edited field that changed server-side since the user began", () => {
+  const form = { ...opened, duration: 4 };
+  const fresh = { ...opened, duration: 7 };
+  expect(findConflicts(form, opened, fresh)).toEqual([{ field: "duration", was: 5, now: 7, mine: 4 }]);
+});
+
+test.each([
+  ["name", "Б", "В"],
+  ["description", "мой текст", "текст агента"],
+  ["assignee", "", "Игорь"],
+  ["duration", 4, 7],
+  ["constraint", "2026-10-05", "2026-10-12"],
+] as const)("findConflicts covers %s", (field, mine, now) => {
+  const form = { ...opened, [field]: mine };
+  const fresh = { ...opened, [field]: now };
+  expect(findConflicts(form, opened, fresh)).toEqual([{ field, was: opened[field], now, mine }]);
+});
+
+test("findConflicts ignores server changes to fields the user hasn't touched", () => {
+  const form = { ...opened, name: "Б" };
+  expect(findConflicts(form, opened, { ...opened, duration: 7, assignee: "Игорь" })).toEqual([]);
+});
+
+test("findConflicts ignores a server change to exactly the value the user typed", () => {
+  const form = { ...opened, duration: 7 };
+  expect(findConflicts(form, opened, { ...opened, duration: 7 })).toEqual([]);
+});
+
+test("findConflicts compares text trimmed, like buildTaskOps", () => {
+  // A whitespace-only edit isn't sent on save, so it can't overwrite anything.
+  expect(findConflicts({ ...opened, name: "А  " }, opened, { ...opened, name: "Б" })).toEqual([]);
+  expect(findConflicts({ ...opened, name: "Б " }, opened, { ...opened, name: "Б" })).toEqual([]);
+});
+
+test("resolveConflicts 'mine' keeps the user's value and makes it a change against the server's", () => {
+  const form = { ...opened, duration: 4, name: "Б" };
+  const fresh = { ...opened, duration: 7 };
+  const result = resolveConflicts(form, opened, fresh, "mine");
+  expect(result.form).toEqual(form);
+  expect(result.baseline).toEqual({ ...opened, duration: 7 });
+  expect(findConflicts(result.form, result.baseline, fresh)).toEqual([]);
+  expect(buildTaskOps({ ...task, duration: 7 }, result.form, result.baseline)).toEqual([
+    { op: "update_task", id: 7, name: "Б", duration: 4 },
+  ]);
+});
+
+test("resolveConflicts 'theirs' takes the server value and keeps the user's other edits", () => {
+  const form = { ...opened, duration: 4, name: "Б" };
+  const fresh = { ...opened, duration: 7 };
+  const result = resolveConflicts(form, opened, fresh, "theirs");
+  expect(result.form).toEqual({ ...opened, duration: 7, name: "Б" });
+  expect(result.baseline).toEqual({ ...opened, duration: 7 });
+  expect(buildTaskOps({ ...task, duration: 7 }, result.form, result.baseline)).toEqual([
+    { op: "update_task", id: 7, name: "Б" },
+  ]);
+});
+
+test("describeConflict names the field and both values, in Russian", () => {
+  expect(describeConflict({ field: "duration", was: 5, now: 7, mine: 4 })).toBe(
+    "Длительность изменилась, пока вы редактировали: теперь 7 дн. (было 5). Ваше значение: 4.",
+  );
+  expect(describeConflict({ field: "name", was: "А", now: "Б", mine: "В" })).toBe(
+    "Название изменилось, пока вы редактировали: теперь «Б» (было «А»). Ваше значение: «В».",
+  );
+  expect(describeConflict({ field: "description", was: "", now: "текст агента", mine: "мой" })).toBe(
+    "Описание изменилось, пока вы редактировали: теперь «текст агента» (было пусто). Ваше значение: «мой».",
+  );
+  expect(describeConflict({ field: "assignee", was: "Мария", now: "Игорь", mine: "" })).toBe(
+    "Исполнитель изменился, пока вы редактировали: теперь Игорь (было Мария). Ваше значение: не назначен.",
+  );
+  expect(describeConflict({ field: "constraint", was: null, now: "2026-10-12", mine: "2026-10-05" })).toBe(
+    "Ограничение «Не раньше» изменилось, пока вы редактировали: теперь 12.10.2026 (было не задано). Ваше значение: 05.10.2026.",
+  );
+});
+
+test("describeConflict shortens long text", () => {
+  const text = describeConflict({ field: "description", was: "", now: "я".repeat(300), mine: "мой" });
+  expect(text).toContain(`теперь «${"я".repeat(60)}…»`);
 });
