@@ -252,9 +252,11 @@ export interface TaskHistoryEntry {
 // GET /api/meta (added alongside this task by a parallel backend change): exposes whether the
 // LLM is a real Anthropic key or the deterministic fake used when none is configured, so the UI
 // can show a "demo mode" hint instead of silently behaving as if the agent understands anything.
+// `max_tasks` is the plan's task limit (backend MAX_TASKS): at it the UI stops offering to add one.
 export interface MetaResponse {
   llm_mode: "anthropic" | "openrouter" | "fake";
   model: string | null;
+  max_tasks: number;
 }
 
 // spec §10: unified error envelope `{error: {code, message, details?}}`.

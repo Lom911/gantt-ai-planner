@@ -3,7 +3,8 @@ name: Uptime
 # External uptime + operational-metrics check of production with alerting through GitHub
 # issues:
 # - /healthz and /api/meta from outside (after retries), and the authenticated
-#   /api/ops/status (5xx rate, p95 latency, LLM tokens today, free disk, nightly backup);
+#   /api/ops/status (5xx rate, p95 latency, LLM tokens today, free disk, nightly backup
+#   and its offsite copy);
 # - any problem -> opens an issue labelled `uptime`, or comments on the one already open,
 #   with the reasons, and fails the run (GitHub also emails the failure);
 # - all fine -> closes any open `uptime` issue with a recovery comment.
@@ -87,7 +88,8 @@ jobs:
       # GET /api/ops/status (bearer OPS_TOKEN = secrets/ops_token on the server) returns
       # {"window_minutes":15,"requests":N,"errors_5xx":N,"error_rate":F,"p95_ms":F,
       #  "tokens_today":N,"chat_messages_today":N,"disk_free_ratio":F,
-      #  "backup":{"status":"ok"|"fail"|"unknown","last_ok":ISO|null,"age_hours":F|null}}.
+      #  "backup":{"status":"ok"|"fail"|"unknown","last_ok":ISO|null,"age_hours":F|null,
+      #    "offsite":{"status":"ok"|"fail"|"not_configured"|"unknown",...same keys}|null}}.
       # No secret -> skipped with a notice; 404 -> endpoint not deployed yet (notice).
       - name: Check operational metrics (/api/ops/status)
         id: ops
@@ -130,12 +132,19 @@ jobs:
               problem "\`/api/ops/status\`: HTTP $code $(head -c 200 "$RUNNER_TEMP/ops-curl.err" | tr '\n' ' ')"
               exit 0 ;;
           esac
-          if ! jq -e 'type == "object" and (.backup | type) == "object"' "$body" >/dev/null 2>&1; then
+          if ! jq -e 'type == "object" and (.backup | type) == "object"
+              and ((.backup.offsite | type) == "object" or .backup.offsite == null)' "$body" >/dev/null 2>&1; then
             problem "\`/api/ops/status\`: HTTP 200 but unexpected body: \`$(head -c 200 "$body" | tr -d '\n`')\`"
             exit 0
           fi
-          jq -r '"requests=\(.requests) errors_5xx=\(.errors_5xx) error_rate=\(.error_rate) p95_ms=\(.p95_ms) tokens_today=\(.tokens_today) chat_messages_today=\(.chat_messages_today) disk_free_ratio=\(.disk_free_ratio) backup=\(.backup.status) last_ok=\(.backup.last_ok) age_hours=\(.backup.age_hours)"' "$body"
+          jq -r '"requests=\(.requests) errors_5xx=\(.errors_5xx) error_rate=\(.error_rate) p95_ms=\(.p95_ms) tokens_today=\(.tokens_today) chat_messages_today=\(.chat_messages_today) disk_free_ratio=\(.disk_free_ratio) backup=\(.backup.status) last_ok=\(.backup.last_ok) age_hours=\(.backup.age_hours) offsite=\(.backup.offsite.status) offsite_last_ok=\(.backup.offsite.last_ok) offsite_age_hours=\(.backup.offsite.age_hours)"' "$body"
           # Thresholds (docs/runbook.md section 6). Null-guarded: in jq, null < 0.1 is true.
+          # The offsite copy alerts on fail, on unknown and past the local dump's 30 h - but
+          # never on not_configured (enabled by a separate server setting, docs/runbook.md
+          # section 4), nor on offsite = null: no offsite_* line in the status file at all, the
+          # copy has never run there (or the app predates the field). Once it has run, its lines
+          # stay in the file, so a copy that stops running still ages into the alert. An
+          # unreadable file is already reported as the local backup's "unknown".
           jq -r '
             def pct: (. * 1000 | round) / 10;
             def win: "the last \(.window_minutes // "?") min";
@@ -150,9 +159,16 @@ jobs:
             (if .backup.status == "fail" then
               "- the last nightly backup FAILED (newest good one: \(.backup.last_ok // "never"))" else empty end),
             (if .backup.status == "unknown" then
-              "- nightly backup status unknown: the app cannot read /var/lib/gantt-planner/backup-status" else empty end),
+              "- nightly backup status unknown: /var/lib/gantt-planner/backup-status is unreadable or has no valid status/time" else empty end),
             (if .backup.age_hours != null and .backup.age_hours > 30 then
-              "- the newest good backup is \(.backup.age_hours | round) h old (> 30 h)" else empty end)
+              "- the newest good backup is \(.backup.age_hours | round) h old (> 30 h)" else empty end),
+            (if .backup.offsite.status == "fail" then
+              "- the last offsite copy FAILED: the dump did not reach the backups repository (newest good copy: \(.backup.offsite.last_ok // "never"))" else empty end),
+            (if .backup.offsite.status == "unknown" and .backup.status != "unknown" then
+              "- offsite copy status unknown: no valid offsite_status/offsite_last_ok in /var/lib/gantt-planner/backup-status" else empty end),
+            (if .backup.offsite.status != "not_configured" and .backup.offsite.age_hours != null
+                and .backup.offsite.age_hours > 30 then
+              "- the newest offsite copy is \(.backup.offsite.age_hours | round) h old (> 30 h)" else empty end)
           ' "$body" >> "$problems_file"
           if [ -s "$problems_file" ]; then
             echo "thresholds breached:"

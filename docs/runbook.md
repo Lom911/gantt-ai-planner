@@ -9,7 +9,7 @@
 этого не делают: `deploy/bootstrap.sh` работает только с пользователем
 `deploy`, каталогами `/opt/gantt-planner`, `/opt/caddy`,
 `/etc/gantt-planner`, сетями Docker `edge` и `planner-proxy` и
-cron-задачей бэкапа.
+systemd-таймером бэкапа.
 
 ## Обзор стенда
 
@@ -95,8 +95,11 @@ cron-задачей бэкапа.
      (`docker network create --internal planner-proxy`), если их нет;
      существующую `planner-proxy` без `--internal` не принимает;
    - поднимает стек Caddy (`docker compose up -d` в `/opt/caddy`);
-   - устанавливает cron `/etc/cron.d/gantt-planner-backup` (03:15 каждый
-     день);
+   - устанавливает и включает systemd-таймер `gantt-planner-backup.timer`
+     (03:15 каждый день по времени хоста, пропущенная ночь догоняется после
+     загрузки; юниты — `deploy/systemd/`) и удаляет файл
+     `/etc/cron.d/gantt-planner-backup` прежних версий: cron-демона на хосте
+     нет, и этот файл никогда не срабатывал;
    - создаёт `/etc/gantt-planner` (0700) и кладёт туда
      `github_known_hosts` (закреплённый ключ хоста github.com) и сообщает,
      настроены ли офсайт-копии (раздел 4, «Офсайт-копии»; пока нет —
@@ -330,8 +333,12 @@ Compose тянет `…:sha-<short>@sha256:<digest>` — ровно тот ма�
 
 ### Гейты CI (до мёржа и до деплоя)
 
-`Deploy` запускается только после зелёного `CI` на push в `main`; `CI`
-на каждом PR и push проверяет, помимо тестов и линтеров:
+`Deploy` запускается только после зелёного `CI` на push в `main`.
+Ручной запуск (`workflow_dispatch` на `main`) тоже требует зелёного `CI`
+для этого коммита: до сборки он проверяет через API последний запуск `CI`
+на push в `main` (`scripts/ci-passed.sh`) и падает, если запуска нет, он
+не успешен или ещё идёт (тогда дождаться и запустить снова). `CI` на
+каждом PR и push проверяет, помимо тестов и линтеров:
 
 - **pip-audit** — известные уязвимости во **всех** зафиксированных в
   `uv.lock` Python-зависимостях, включая dev (pytest, mypy, ruff…: они
@@ -654,16 +661,32 @@ cat secrets/ops_token    # -> GitHub: Settings → Secrets and variables → Act
 ## 4. Проверка восстановления из бэкапа
 
 Бэкап делает `deploy/backup.sh` каждую ночь в 03:15
-(`/etc/cron.d/gantt-planner-backup`): `pg_dump -Fc` от `planner_owner` в
+(`gantt-planner-backup.timer`, `systemctl list-timers gantt-planner-backup.timer`
+покажет следующий запуск; запустить сейчас — `systemctl start
+gantt-planner-backup.service`): `pg_dump -Fc` от `planner_owner` в
 `/var/backups/gantt-planner/<дата>.dump`, дампы старше 7 дней удаляются.
 Пустой вывод `pg_dump` считается ошибкой и не затирает хороший дамп.
+
+Деплой юниты таймера не ставит — только `bootstrap.sh`. На хосте, настроенном
+до 29.09.2026, остался cron-файл, который никогда не срабатывал (cron-демона
+нет). Такому хосту нужен повторный `sudo bash deploy/bootstrap.sh`
+(идемпотентен) или то же вручную:
+
+```bash
+install -m 0644 deploy/systemd/gantt-planner-backup.{service,timer} /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now gantt-planner-backup.timer
+rm -f /etc/cron.d/gantt-planner-backup
+systemctl start gantt-planner-backup.service   # сразу проверить: backup-status → ok
+```
+
+На проде это сделано 29.09.2026.
 
 Сбой бэкапа не проходит молча — каждый запуск оставляет след:
 
 ```bash
 journalctl -t gantt-planner-backup --since -2d   # "ok: wrote ..." или "FAILED (exit N) ..."
 cat /var/lib/gantt-planner/backup-status          # итог последнего запуска
-tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод cron (stderr pg_dump)
+tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод запуска (stderr pg_dump)
 ```
 
 `backup-status` — пары `ключ=значение`: `timestamp` (UTC), `status`
@@ -673,7 +696,8 @@ tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод cron
 этот файл (каталог `/var/lib/gantt-planner` смонтирован в `app` только
 для чтения) и отдаёт итог в `GET /api/ops/status`; workflow `Uptime`
 поднимает алерт, если бэкап упал, его статус неизвестен или свежайшему
-хорошему дампу больше 30 часов (раздел 6).
+хорошему дампу больше 30 часов (раздел 6). Строки `offsite_*` в том же
+файле пишет офсайт-копия (ниже), они отдаются как `backup.offsite`.
 
 Снапшоты `pre-deploy-*.dump` (раздел 2) лежат в том же каталоге и
 годятся для восстановления так же, как ночные.
@@ -733,8 +757,10 @@ docker compose -f compose.prod.yml exec -T db psql -U postgres -c \
 `offsite not configured` и выходит с кодом 0 — локальный бэкап всё равно
 считается успешным. Сбой офсайт-копии тоже не делает ночной бэкап
 неуспешным (он записан как `offsite_status=fail` и предупреждение в
-журнале `gantt-planner-backup`); застой ловит проверка восстановления
-(ниже): она падает, если свежайшей копии больше 3 дней. Платного
+журнале `gantt-planner-backup`), но поднимает алерт `Uptime` — как и
+копия старше 30 часов (раздел 6); `not_configured` алерта не даёт.
+Вдобавок застой ловит проверка восстановления (ниже): она падает, если
+свежайшей копии больше 3 дней. Платного
 хранилища не нужно: приватный репозиторий и Actions (≈2 минуты в неделю
 из бесплатных 2000 в месяц) бесплатны.
 
@@ -904,7 +930,11 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
 - `GET /api/ops/status` с заголовком `Authorization: Bearer <OPS_TOKEN>`
   (секрет репозитория `OPS_TOKEN` = `/opt/gantt-planner/secrets/ops_token`)
   — внутренние метрики приложения. Ответ:
-  `{"window_minutes":15,"requests":…,"errors_5xx":…,"error_rate":…,"p95_ms":…,"tokens_today":…,"chat_messages_today":…,"disk_free_ratio":…,"backup":{"status":"ok|fail|unknown","last_ok":…,"age_hours":…}}`.
+  `{"window_minutes":15,"requests":…,"errors_5xx":…,"error_rate":…,"p95_ms":…,"tokens_today":…,"chat_messages_today":…,"disk_free_ratio":…,"backup":{"status":"ok|fail|unknown","last_ok":…,"age_hours":…,"offsite":{"status":"ok|fail|not_configured|unknown","last_ok":…,"age_hours":…}}}`.
+  `backup.offsite` — `null`, если строк `offsite_*` в `backup-status` нет
+  вовсе (офсайт-копия на этом сервере ещё ни разу не запускалась);
+  `unknown` — строки есть, но без понятного `offsite_status` или, при `ok`, без читаемого
+  `offsite_last_ok` (у `ok` без времени нет возраста, и он никогда не устарел бы).
   Алерт, если:
 
   | условие | смысл |
@@ -914,11 +944,16 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
   | `tokens_today > 3000000` | за сутки потрачено больше 3 млн токенов LLM (расходы) |
   | `disk_free_ratio < 0.10` | свободно меньше 10 % диска |
   | `backup.status == "fail"` | последний ночной бэкап упал |
-  | `backup.status == "unknown"` | приложение не может прочитать `backup-status` |
+  | `backup.status == "unknown"` | приложение не может прочитать `backup-status`, или в нём нет понятного статуса либо времени удачного запуска |
   | `backup.age_hours > 30` | свежайшему хорошему дампу больше 30 часов |
+  | `backup.offsite.status == "fail"` | зашифрованная копия не ушла в репозиторий бэкапов (локальный дамп при этом может быть в порядке) |
+  | `backup.offsite.status == "unknown"` | строки `offsite_*` испорчены (при нечитаемом файле хватает алерта `backup.status`) |
+  | `backup.offsite.age_hours > 30` | свежайшей офсайт-копии больше 30 часов (кроме `not_configured`) |
 
-  А также `401/403` (секрет `OPS_TOKEN` не совпадает с файлом на
-  сервере), другой код или тело не того формата. Без секрета `OPS_TOKEN`
+  `not_configured` и `null` алерта не дают: офсайт-копия включается
+  отдельной настройкой сервера (раздел 4). А также `401/403` (секрет
+  `OPS_TOKEN` не совпадает с файлом на сервере), другой код или тело не
+  того формата. Без секрета `OPS_TOKEN`
   проверка метрик пропускается с notice; `404` значит, что эндпоинт ещё
   не задеплоен, — тоже notice, не алерт.
 
@@ -964,6 +999,10 @@ Uptime → Run workflow) проверяет прод снаружи, с ранн
      `cat /var/lib/gantt-planner/backup-status`); `unknown` — файла нет
      или он не смонтирован в `app` (`docker compose … exec app cat
      /var/lib/gantt-planner/backup-status`);
+   - офсайт-копия — `journalctl -t gantt-planner-offsite --since -2d` и
+     `grep '^offsite_' /var/lib/gantt-planner/backup-status`; после
+     исправления (раздел 4, «Офсайт-копии») запустить
+     `sudo /usr/local/bin/gantt-planner-offsite-backup.sh` вручную;
    - `401/403` — секрет `OPS_TOKEN` в GitHub не совпадает с
      `secrets/ops_token` (раздел 3, «Токен ops-эндпоинта»).
 5. Issue закроется сам на следующей успешной проверке (или запустить

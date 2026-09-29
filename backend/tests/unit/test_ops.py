@@ -93,17 +93,87 @@ def _status_file(tmp_path, text):
     return str(path)
 
 
+LOCAL_OK = (
+    "timestamp=2026-09-27T03:15:04Z\nstatus=ok\nexit_code=0\nsize_bytes=183422\n"
+    "file=/var/backups/gantt-planner/2026-09-27.dump\nlast_ok=2026-09-27T03:15:04Z\n"
+)
+
+
 def test_backup_ok(tmp_path):
-    path = _status_file(
-        tmp_path,
-        "timestamp=2026-09-27T03:15:04Z\nstatus=ok\nexit_code=0\nsize_bytes=183422\n"
-        "file=/var/backups/gantt-planner/2026-09-27.dump\nlast_ok=2026-09-27T03:15:04Z\n",
-    )
-    assert read_backup_status(path, NOW) == {
+    assert read_backup_status(_status_file(tmp_path, LOCAL_OK), NOW) == {
         "status": "ok",
         "last_ok": "2026-09-27T03:15:04Z",
         "age_hours": pytest.approx(8.75, abs=0.01),
+        # No offsite_* lines: the offsite copy has never run on this server (not installed,
+        # or a file older than it) - no offsite section rather than an alerting "unknown".
+        "offsite": None,
     }
+
+
+def test_offsite_copy_ok(tmp_path):
+    path = _status_file(
+        tmp_path,
+        LOCAL_OK + "offsite_status=ok\noffsite_last_ok=2026-09-27T03:16:30Z\n"
+        "offsite_file=dumps/2026-09-27.dump.cms\n",
+    )
+    status = read_backup_status(path, NOW)
+    assert status["status"] == "ok"
+    assert status["offsite"] == {
+        "status": "ok",
+        "last_ok": "2026-09-27T03:16:30Z",
+        "age_hours": pytest.approx(8.73, abs=0.01),
+    }
+
+
+def test_offsite_copy_failed_while_the_local_dump_succeeded(tmp_path):
+    # The defect this section exists for: a good local dump, a failed push to the backups repo.
+    path = _status_file(
+        tmp_path,
+        LOCAL_OK + "offsite_status=fail\noffsite_last_ok=2026-09-24T03:16:00Z\n"
+        "offsite_file=dumps/2026-09-24.dump.cms\n",
+    )
+    status = read_backup_status(path, NOW)
+    assert status["status"] == "ok"
+    assert status["offsite"] == {
+        "status": "fail",
+        "last_ok": "2026-09-24T03:16:00Z",
+        "age_hours": pytest.approx(80.73, abs=0.01),
+    }
+
+
+def test_offsite_copy_that_never_succeeded(tmp_path):
+    path = _status_file(tmp_path, LOCAL_OK + "offsite_status=fail\noffsite_last_ok=\n")
+    offsite = read_backup_status(path, NOW)["offsite"]
+    assert offsite == {"status": "fail", "last_ok": None, "age_hours": None}
+
+
+def test_offsite_copy_not_configured(tmp_path):
+    path = _status_file(
+        tmp_path, LOCAL_OK + "offsite_status=not_configured\noffsite_last_ok=\noffsite_file=\n"
+    )
+    offsite = read_backup_status(path, NOW)["offsite"]
+    assert offsite == {"status": "not_configured", "last_ok": None, "age_hours": None}
+
+
+@pytest.mark.parametrize(
+    "offsite_lines",
+    [
+        "offsite_status=maybe\noffsite_last_ok=2026-09-27T03:16:30Z\n",
+        "offsite_last_ok=2026-09-27T03:16:30Z\noffsite_file=dumps/2026-09-27.dump.cms\n",
+        "offsite_status=\n",
+    ],
+)
+def test_garbled_offsite_lines_are_unknown(tmp_path, offsite_lines):
+    offsite = read_backup_status(_status_file(tmp_path, LOCAL_OK + offsite_lines), NOW)["offsite"]
+    assert offsite == {"status": "unknown", "last_ok": None, "age_hours": None}
+
+
+def test_offsite_lines_are_read_even_if_the_local_ones_are_garbled(tmp_path):
+    # Two scripts write the file; one's broken lines don't hide the other's.
+    path = _status_file(tmp_path, "status=maybe\noffsite_status=fail\noffsite_last_ok=\n")
+    status = read_backup_status(path, NOW)
+    assert status["status"] == "unknown"
+    assert status["offsite"] == {"status": "fail", "last_ok": None, "age_hours": None}
 
 
 def test_backup_failed_after_an_earlier_success(tmp_path):
@@ -119,7 +189,12 @@ def test_backup_failed_after_an_earlier_success(tmp_path):
 
 def test_backup_that_never_succeeded(tmp_path):
     path = _status_file(tmp_path, "timestamp=2026-09-27T03:15:04Z\nstatus=fail\nlast_ok=\n")
-    assert read_backup_status(path, NOW) == {"status": "fail", "last_ok": None, "age_hours": None}
+    assert read_backup_status(path, NOW) == {
+        "status": "fail",
+        "last_ok": None,
+        "age_hours": None,
+        "offsite": None,
+    }
 
 
 UNKNOWN = {"status": "unknown", "last_ok": None, "age_hours": None}
@@ -130,13 +205,35 @@ UNKNOWN = {"status": "unknown", "last_ok": None, "age_hours": None}
     ["", "garbage\x00\x01", "status=maybe\nlast_ok=2026-09-27T03:15:04Z\n", "status\nok\n"],
 )
 def test_garbled_backup_status_is_unknown(tmp_path, text):
-    assert read_backup_status(_status_file(tmp_path, text), NOW) == UNKNOWN
+    assert read_backup_status(_status_file(tmp_path, text), NOW) == {**UNKNOWN, "offsite": None}
 
 
 def test_missing_backup_status_is_unknown(tmp_path):
-    assert read_backup_status(str(tmp_path / "nope"), NOW) == UNKNOWN
+    # Unreadable: whether the offsite copy ran can't be told either.
+    assert read_backup_status(str(tmp_path / "nope"), NOW) == {**UNKNOWN, "offsite": UNKNOWN}
 
 
-def test_unparseable_last_ok_is_dropped_not_fatal(tmp_path):
-    path = _status_file(tmp_path, "status=ok\nlast_ok=yesterday\ntimestamp=also-bad\n")
-    assert read_backup_status(path, NOW) == {"status": "ok", "last_ok": None, "age_hours": None}
+def test_ok_without_a_readable_moment_is_unknown(tmp_path):
+    # "ok" with no parseable time has no age to go stale, so it would never alert: a garbled
+    # file must not look healthy. Both scripts always write the moment of a good run.
+    path = _status_file(
+        tmp_path,
+        "status=ok\nlast_ok=yesterday\ntimestamp=also-bad\n"
+        "offsite_status=ok\noffsite_last_ok=today\n",
+    )
+    assert read_backup_status(path, NOW) == {**UNKNOWN, "offsite": UNKNOWN}
+
+
+def test_offsite_ok_without_last_ok_is_unknown(tmp_path):
+    path = _status_file(tmp_path, LOCAL_OK + "offsite_status=ok\noffsite_file=dumps/x.dump.cms\n")
+    assert read_backup_status(path, NOW)["offsite"] == UNKNOWN
+
+
+def test_failed_run_without_last_ok_stays_failed(tmp_path):
+    # Never succeeded: no good moment to report, but "fail" alerts by itself.
+    path = _status_file(tmp_path, LOCAL_OK + "offsite_status=fail\noffsite_last_ok=\n")
+    assert read_backup_status(path, NOW)["offsite"] == {
+        "status": "fail",
+        "last_ok": None,
+        "age_hours": None,
+    }

@@ -1,5 +1,12 @@
 import type { ScheduledPlan, ScheduledTask } from "@/api/types";
-import { buildNewTaskOps, emptyNewTaskForm, validateNewTaskForm } from "./newTaskOps";
+import {
+  buildNewTaskOps,
+  deletedAnchorNotice,
+  dropDeletedAnchors,
+  emptyNewTaskForm,
+  taskLimitNotice,
+  validateNewTaskForm,
+} from "./newTaskOps";
 
 const task = (id: number): ScheduledTask => ({
   id,
@@ -81,4 +88,32 @@ test("validation: a successor that already leads to the predecessor would close 
     /№6 уже идёт раньше №9/,
   );
   expect(validateNewTaskForm(chain, { ...emptyNewTaskForm(6), name: "X", successorId: 9 })).toBeNull();
+});
+
+test("a chosen task deleted while the form is open: its selections are cleared and reported", () => {
+  // Opened from 6's card (after 6, starting after it), then 7 picked as the successor; the agent
+  // deletes 6 and 7. What the user typed stays.
+  const form = { ...emptyNewTaskForm(6), name: "Ревью", successorId: 7 };
+  const withoutThem = { ...plan, tasks: [task(9)], dependencies: [] };
+  expect(dropDeletedAnchors(withoutThem, form)).toEqual({
+    form: { ...form, afterId: null, predecessorId: null, successorId: null },
+    deleted: { afterId: 6, predecessorId: 6, successorId: 7 },
+  });
+});
+
+test("every chosen task still in the plan: nothing to drop", () => {
+  expect(dropDeletedAnchors(plan, { ...emptyNewTaskForm(6), successorId: 7 })).toBeNull();
+  expect(dropDeletedAnchors({ ...plan, tasks: [] }, emptyNewTaskForm(null))).toBeNull();
+});
+
+test("the deleted-task notice names the task", () => {
+  expect(deletedAnchorNotice(7)).toBe("Задачу №7 удалили, пока форма была открыта — выберите другую");
+});
+
+test("the task limit: a notice once the plan has reached it, nothing below it or before meta loads", () => {
+  const withTasks = (n: number) => ({ ...plan, tasks: Array.from({ length: n }, (_, i) => task(i + 1)) });
+  expect(taskLimitNotice(withTasks(500), 500)).toBe("В плане уже 500 задач — это предел");
+  expect(taskLimitNotice(withTasks(2), 2)).toBe("В плане уже 2 задачи — это предел");
+  expect(taskLimitNotice(withTasks(499), 500)).toBeNull();
+  expect(taskLimitNotice(withTasks(500), undefined)).toBeNull();
 });

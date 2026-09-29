@@ -3,9 +3,19 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, ApiError } from "@/api/client";
 import type { ScheduledPlan } from "@/api/types";
+import { useMeta } from "@/hooks/useMeta";
 import { cachedPlanVersion, PLAN_KEY, refetchOnConflict } from "@/hooks/usePlan";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { buildNewTaskOps, emptyNewTaskForm, validateNewTaskForm, type NewTaskForm } from "./newTaskOps";
+import {
+  buildNewTaskOps,
+  deletedAnchorNotice,
+  dropDeletedAnchors,
+  emptyNewTaskForm,
+  taskLimitNotice,
+  validateNewTaskForm,
+  type AnchorField,
+  type NewTaskForm,
+} from "./newTaskOps";
 
 const ASSIGNEE_DATALIST_ID = "new-task-assignees";
 const INPUT = "rounded-md border border-input bg-background px-2 py-1";
@@ -32,6 +42,21 @@ export function NewTaskModal({
     setFormState(next);
     setError(null);
   };
+  // Tasks this form pointed at that were deleted while it was open, by field: the notice stays
+  // next to the field until the user picks something there again.
+  const [deletedAnchors, setDeletedAnchors] = useState<Partial<Record<AnchorField, number>>>({});
+  const { data: meta } = useMeta();
+
+  // `plan` follows every update (the agent, another tab), so a chosen task can disappear under
+  // the form. Dropped during render, not in an effect: like TaskModal's rebase, it's form state
+  // derived from a changed prop.
+  const dropped = dropDeletedAnchors(plan, form);
+  if (dropped) {
+    setForm(dropped.form);
+    setDeletedAnchors({ ...deletedAnchors, ...dropped.deleted });
+  }
+  // The agent can also fill the plan up to its limit while the form is open.
+  const limitNotice = taskLimitNotice(plan, meta?.max_tasks);
 
   const assigneeOptions = Array.from(
     new Set(plan.tasks.map((t) => t.assignee?.trim()).filter((a): a is string => Boolean(a))),
@@ -43,6 +68,14 @@ export function NewTaskModal({
     </option>
   ));
   const toId = (value: string) => (value === "" ? null : Number(value));
+  const setAnchor = (field: AnchorField, value: string) => {
+    setForm({ ...form, [field]: toId(value) });
+    setDeletedAnchors({ ...deletedAnchors, [field]: undefined });
+  };
+  const anchorNotice = (field: AnchorField) => {
+    const id = deletedAnchors[field];
+    return id != null && <span className="text-xs text-amber-600">{deletedAnchorNotice(id)}</span>;
+  };
   const replacedLink =
     form.predecessorId != null &&
     form.successorId != null &&
@@ -129,11 +162,12 @@ export function NewTaskModal({
             <select
               className={INPUT}
               value={form.predecessorId ?? ""}
-              onChange={(e) => setForm({ ...form, predecessorId: toId(e.target.value) })}
+              onChange={(e) => setAnchor("predecessorId", e.target.value)}
             >
               <option value="">— не зависит от других задач —</option>
               {taskOptions}
             </select>
+            {anchorNotice("predecessorId")}
           </label>
 
           <label className="flex flex-col gap-1 text-sm">
@@ -141,11 +175,12 @@ export function NewTaskModal({
             <select
               className={INPUT}
               value={form.successorId ?? ""}
-              onChange={(e) => setForm({ ...form, successorId: toId(e.target.value) })}
+              onChange={(e) => setAnchor("successorId", e.target.value)}
             >
               <option value="">— ни одна задача её не ждёт —</option>
               {taskOptions}
             </select>
+            {anchorNotice("successorId")}
             <span className="text-xs text-muted-foreground">
               {replacedLink
                 ? `Встанет между ними: связь ${label(form.predecessorId!)} → №${form.successorId} заменится цепочкой через новую задачу.`
@@ -159,7 +194,7 @@ export function NewTaskModal({
               <select
                 className={INPUT}
                 value={form.afterId ?? ""}
-                onChange={(e) => setForm({ ...form, afterId: toId(e.target.value) })}
+                onChange={(e) => setAnchor("afterId", e.target.value)}
               >
                 <option value="">В конец списка</option>
                 {plan.tasks.map((t) => (
@@ -168,6 +203,7 @@ export function NewTaskModal({
                   </option>
                 ))}
               </select>
+              {anchorNotice("afterId")}
             </label>
             <label className="flex flex-col gap-1 text-sm">
               Не раньше
@@ -180,6 +216,11 @@ export function NewTaskModal({
             </label>
           </div>
 
+          {limitNotice && (
+            <p role="status" className="text-sm text-amber-600">
+              {limitNotice}
+            </p>
+          )}
           {error && <p className="text-sm text-destructive">{error}</p>}
 
           <div className="mt-2 flex justify-end gap-2">
@@ -193,7 +234,7 @@ export function NewTaskModal({
             <button
               type="button"
               className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
-              disabled={disabled || saving}
+              disabled={disabled || saving || limitNotice != null}
               onClick={() => void handleCreate()}
             >
               Добавить

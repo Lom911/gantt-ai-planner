@@ -139,3 +139,22 @@ async def test_in_process_agent_may_omit_expected_version_but_it_is_checked_if_g
         turn_id=turn,
     )
     assert r.is_error and "version_conflict" in r.text
+
+
+async def test_clamped_bridge_lag_warning_reaches_the_agent(app):
+    sid = await new_sid(app)
+    tools = app.state.tool_client
+    turn = uuid.uuid4()
+    chain = [
+        {"op": "add_task", "name": "A", "duration": 1},
+        {"op": "add_task", "name": "B", "duration": 1, "predecessors": [{"id": 26, "lag": 365}]},
+        {"op": "add_task", "name": "C", "duration": 1, "predecessors": [{"id": 27, "lag": 365}]},
+    ]
+    r = await tools.call("apply_operations", {"operations": chain}, session_id=sid, turn_id=turn)
+    assert not r.is_error, r.text
+    delete = {"operations": [{"op": "delete_task", "id": 27}]}
+    r = await tools.call("apply_operations", delete, session_id=sid, turn_id=turn)
+    assert not r.is_error, r.text
+    warning = "Задержка связи №26 → №28 после удаления №27 обрезана до 365 дней (было бы 730)"
+    assert r.data["warnings"] == [warning]
+    assert warning in r.text  # the text the chat agent's model reads
