@@ -1,0 +1,11 @@
+# Runs gantt-planner-backup.service every night at 03:15 host time.
+[Unit]
+Description=Nightly gantt-planner database backup at 03:15
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+# A night missed while the host was down runs right after the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+# Nightly pg_dump of the planner database and its offsite copy
+# (deploy/backup.sh, installed as /usr/local/bin/gantt-planner-backup.sh).
+# Started by gantt-planner-backup.timer; both units are installed by
+# deploy/bootstrap.sh. A timer rather than /etc/cron.d: the host runs no
+# cron daemon, so a cron file there never fires.
+[Unit]
+Description=gantt-planner nightly database backup
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/gantt-planner-backup.sh
+# Same log file the cron job wrote to (docs/runbook.md, section 4).
+StandardOutput=append:/var/log/gantt-planner-backup.log
+StandardError=append:/var/log/gantt-planner-backup.log
+# A dump plus the offsite push takes seconds; never let a hung one hold the unit.
+TimeoutStartSec=30min

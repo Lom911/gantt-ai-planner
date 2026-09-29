@@ -11,7 +11,7 @@
 # and never runs ufw - it only manages the 'deploy' user, the
 # /opt/gantt-planner and /opt/caddy stacks, the Docker networks 'edge'
 # (Caddy <-> other sites) and 'planner-proxy' (internal, Caddy <-> app
-# only), the backup cron job and /etc/gantt-planner (offsite backup
+# only), the backup systemd timer and /etc/gantt-planner (offsite backup
 # settings). It takes the deploy lock, so it never swaps files under a
 # running deploy.
 set -euo pipefail
@@ -29,7 +29,9 @@ OFFSITE_BIN=/usr/local/bin/gantt-planner-offsite-backup.sh
 OFFSITE_CONF_DIR=/etc/gantt-planner
 LOCK_FILE=/run/lock/planner-deploy.lock
 SUDOERS_FILE=/etc/sudoers.d/gantt-planner-deploy
+# Installed by earlier versions; nothing ran it (the host has no cron daemon).
 CRON_FILE=/etc/cron.d/gantt-planner-backup
+SYSTEMD_DIR=/etc/systemd/system
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POSTGRES_UID=70
 POSTGRES_GID=70
@@ -322,12 +324,20 @@ step_caddy() {
     (cd "$CADDY_DIR" && docker compose up -d)
 }
 
-step_backup_cron() {
-    echo "==> Installing nightly backup cron job"
-    printf '15 3 * * * root %s >> /var/log/gantt-planner-backup.log 2>&1\n' "$BACKUP_BIN" > "$CRON_FILE"
-    chmod 0644 "$CRON_FILE"
-    chown root:root "$CRON_FILE"
-    echo "    installed $CRON_FILE"
+step_backup_timer() {
+    echo "==> Installing the nightly backup systemd timer (03:15 host time)"
+    local unit
+    for unit in gantt-planner-backup.service gantt-planner-backup.timer; do
+        install -m 0644 -o root -g root "$SCRIPT_DIR/systemd/$unit" "$SYSTEMD_DIR/$unit"
+    done
+    systemctl daemon-reload
+    systemctl enable --now gantt-planner-backup.timer
+    echo "    enabled gantt-planner-backup.timer"
+    # With a cron daemon installed later, the old file would run the backup twice a night.
+    if [ -e "$CRON_FILE" ]; then
+        rm -f "$CRON_FILE"
+        echo "    removed the old $CRON_FILE"
+    fi
 }
 
 main() {
@@ -349,7 +359,7 @@ main() {
     step_compose_files
     step_network
     step_caddy
-    step_backup_cron
+    step_backup_timer
     step_offsite
     echo "==> Bootstrap complete."
     echo "    Remaining manual steps:"

@@ -9,7 +9,7 @@
 этого не делают: `deploy/bootstrap.sh` работает только с пользователем
 `deploy`, каталогами `/opt/gantt-planner`, `/opt/caddy`,
 `/etc/gantt-planner`, сетями Docker `edge` и `planner-proxy` и
-cron-задачей бэкапа.
+systemd-таймером бэкапа.
 
 ## Обзор стенда
 
@@ -95,8 +95,11 @@ cron-задачей бэкапа.
      (`docker network create --internal planner-proxy`), если их нет;
      существующую `planner-proxy` без `--internal` не принимает;
    - поднимает стек Caddy (`docker compose up -d` в `/opt/caddy`);
-   - устанавливает cron `/etc/cron.d/gantt-planner-backup` (03:15 каждый
-     день);
+   - устанавливает и включает systemd-таймер `gantt-planner-backup.timer`
+     (03:15 каждый день по времени хоста, пропущенная ночь догоняется после
+     загрузки; юниты — `deploy/systemd/`) и удаляет файл
+     `/etc/cron.d/gantt-planner-backup` прежних версий: cron-демона на хосте
+     нет, и этот файл никогда не срабатывал;
    - создаёт `/etc/gantt-planner` (0700) и кладёт туда
      `github_known_hosts` (закреплённый ключ хоста github.com) и сообщает,
      настроены ли офсайт-копии (раздел 4, «Офсайт-копии»; пока нет —
@@ -654,7 +657,9 @@ cat secrets/ops_token    # -> GitHub: Settings → Secrets and variables → Act
 ## 4. Проверка восстановления из бэкапа
 
 Бэкап делает `deploy/backup.sh` каждую ночь в 03:15
-(`/etc/cron.d/gantt-planner-backup`): `pg_dump -Fc` от `planner_owner` в
+(`gantt-planner-backup.timer`, `systemctl list-timers gantt-planner-backup.timer`
+покажет следующий запуск; запустить сейчас — `systemctl start
+gantt-planner-backup.service`): `pg_dump -Fc` от `planner_owner` в
 `/var/backups/gantt-planner/<дата>.dump`, дампы старше 7 дней удаляются.
 Пустой вывод `pg_dump` считается ошибкой и не затирает хороший дамп.
 
@@ -663,7 +668,7 @@ cat secrets/ops_token    # -> GitHub: Settings → Secrets and variables → Act
 ```bash
 journalctl -t gantt-planner-backup --since -2d   # "ok: wrote ..." или "FAILED (exit N) ..."
 cat /var/lib/gantt-planner/backup-status          # итог последнего запуска
-tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод cron (stderr pg_dump)
+tail -n 50 /var/log/gantt-planner-backup.log      # полный вывод запуска (stderr pg_dump)
 ```
 
 `backup-status` — пары `ключ=значение`: `timestamp` (UTC), `status`

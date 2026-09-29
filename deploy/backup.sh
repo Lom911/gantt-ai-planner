@@ -3,7 +3,8 @@
 #
 # Nightly logical backup of the production 'planner' database. Installed
 # by deploy/bootstrap.sh at /usr/local/bin/gantt-planner-backup.sh and run
-# by /etc/cron.d/gantt-planner-backup at 03:15 every day. Dumps older than
+# by the gantt-planner-backup.timer systemd unit (deploy/systemd/) at 03:15
+# every day. Dumps older than
 # RETENTION_DAYS are pruned on every run.
 #
 # A failure is never silent: every run - successful or not - is logged to
