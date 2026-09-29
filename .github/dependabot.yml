@@ -35,6 +35,12 @@ updates:
       minor-and-patch:
         applies-to: version-updates
         update-types: ["minor", "patch"]
+    # The backend's Python (3.12) is pinned together with backend/.python-version and the
+    # CI; moving to 3.13/3.14 is a deliberate upgrade of the whole backend, not a bot PR.
+    # New 3.12 patch releases and base-image digests still come in.
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   # docker-compose.yml (dev), deploy/compose.prod.yml and deploy/caddy/compose.yml
   # pin images by digest;
