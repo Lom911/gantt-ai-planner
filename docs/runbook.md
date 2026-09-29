@@ -40,7 +40,7 @@ cron-задачей бэкапа.
   - `gantt-planner_backend` (internal) — `app`/`migrate` ↔ `db`;
   - `gantt-planner_egress` — отдельная сеть проекта, только у `app`:
     исходящий HTTPS к API LLM (OpenRouter/Anthropic).
-- Образ приложения: `ghcr.io/alomaev-hue/gantt-ai-planner`, теги
+- Образ приложения: `ghcr.io/lom911/gantt-ai-planner`, теги
   `sha-<короткий-sha>` и `latest`. Теги в GHCR изменяемые, поэтому сервер
   принимает **только** ссылку с неизменяемым digest
   (`sha-<short>@sha256:<digest>`) — и от CD, и при ручном деплое/откате;
@@ -102,7 +102,7 @@ cron-задачей бэкапа.
      настроены ли офсайт-копии (раздел 4, «Офсайт-копии»; пока нет —
      бэкапы остаются только локальными).
 3. После bootstrap вручную:
-   - убедиться, что пакет `ghcr.io/alomaev-hue/gantt-ai-planner` публичный,
+   - убедиться, что пакет `ghcr.io/lom911/gantt-ai-planner` публичный,
      иначе `docker compose pull` на сервере (без залогина в GHCR) не сможет
      скачать образ. Пакет, опубликованный из Actions публичного
      репозитория, наследует его видимость (так и вышло на этом проде); если
@@ -158,7 +158,7 @@ cron-задачей бэкапа.
    ```bash
    cd /opt/gantt-planner
    # digest образа sha-<commit> (см. раздел 2, «Где взять digest»):
-   docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<commit> --format '{{.Manifest.Digest}}'
+   docker buildx imagetools inspect ghcr.io/lom911/gantt-ai-planner:sha-<commit> --format '{{.Manifest.Digest}}'
    # Дописать (>>, а не >: в .env уже лежат LLM_PROVIDER/LLM_MODEL).
    echo "IMAGE_TAG=sha-<commit>@sha256:<digest>" >> .env
    docker compose -f compose.prod.yml pull
@@ -374,7 +374,7 @@ Compose тянет `…:sha-<short>@sha256:<digest>` — ровно тот ма�
    чистом Postgres (роли как в проде — `deploy/initdb/10-roles.sh`,
    миграции от `planner_owner`);
 2. на этой схеме запускается **предыдущий релиз** —
-   `ghcr.io/alomaev-hue/gantt-ai-planner:sha-<первые 7 символов базового
+   `ghcr.io/lom911/gantt-ai-planner:sha-<первые 7 символов базового
    коммита>` (для PR — `base.sha`, для push — коммит до push'а, то есть
    то, что сейчас в проде) — от `planner_app`, с фейковой LLM;
 3. smoke-тест старого приложения: `/healthz`, новая сессия,
@@ -405,14 +405,14 @@ expand/contract (список выше). Для проверки самой пр
   «Push scanned image to GHCR» (`pushed ghcr.io/…:sha-<short>@sha256:…`);
 - из реестра по тегу (с любой машины с Docker; пакет публичный):
   ```bash
-  docker buildx imagetools inspect ghcr.io/alomaev-hue/gantt-ai-planner:sha-<short> --format '{{.Manifest.Digest}}'
+  docker buildx imagetools inspect ghcr.io/lom911/gantt-ai-planner:sha-<short> --format '{{.Manifest.Digest}}'
   # или весь дескриптор манифеста: --format '{{json .Manifest}}'  (поле "digest")
   ```
   Это digest того, на что тег указывает **сейчас**; для релизов из CD он
   совпадает с тем, что напечатал `Deploy`, пока тег никто не переписал —
   при сомнениях брать значение из `Deploy`;
 - для образа, который уже есть на сервере (например, предыдущий релиз):
-  `docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/alomaev-hue/gantt-ai-planner:sha-<short>`
+  `docker image inspect --format '{{index .RepoDigests 0}}' ghcr.io/lom911/gantt-ai-planner:sha-<short>`
   (печатает `ghcr.io/…@sha256:<digest>`);
 - ссылка предыдущего релиза целиком — в логе `planner-deploy`: перед
   каждым деплоем он печатает `previous: 'sha-…@sha256:…'` (вывод шага

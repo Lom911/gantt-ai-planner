@@ -63,12 +63,12 @@ jobs:
           load: true
           push: false
           tags: |
-            ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
-            ghcr.io/alomaev-hue/gantt-ai-planner:latest
+            ghcr.io/lom911/gantt-ai-planner:${{ steps.meta.outputs.tag }}
+            ghcr.io/lom911/gantt-ai-planner:latest
 
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ghcr.io/alomaev-hue/gantt-ai-planner:${{ steps.meta.outputs.tag }}
+          image-ref: ghcr.io/lom911/gantt-ai-planner:${{ steps.meta.outputs.tag }}
           # Block on HIGH too, but only when a fixed version exists (ignore-unfixed): an
           # unfixable base-image CVE would otherwise block every deploy with nothing to do.
           # So this gate covers FIXABLE HIGH/CRITICAL CVEs only (CI runs the same scan on PRs).
@@ -84,7 +84,7 @@ jobs:
       - name: Push scanned image to GHCR
         id: push
         env:
-          IMAGE: ghcr.io/alomaev-hue/gantt-ai-planner
+          IMAGE: ghcr.io/lom911/gantt-ai-planner
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail

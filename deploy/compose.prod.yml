@@ -88,7 +88,7 @@ services:
       start_period: 10s
 
   migrate:
-    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
+    image: ghcr.io/lom911/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
     command: ["alembic", "upgrade", "head"]
     environment:
       DB_HOST: db
@@ -122,7 +122,7 @@ services:
         max-file: "3"
 
   app:
-    image: ghcr.io/alomaev-hue/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
+    image: ghcr.io/lom911/gantt-ai-planner:${IMAGE_TAG:?IMAGE_TAG must be set}
     environment:
       DB_HOST: db
       DB_PORT: "5432"
