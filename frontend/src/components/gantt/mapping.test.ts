@@ -1,5 +1,6 @@
 import {
   boxesOverlap,
+  centerDayScroll,
   closestTaskId,
   dayAtOffset,
   durationLabel,
@@ -131,6 +132,31 @@ describe("dayAtOffset", () => {
     expect(dayAtOffset(cells, -1)).toBeNull();
     expect(dayAtOffset(cells, 114)).toBeNull();
     expect(dayAtOffset([{ date: new Date(2026, 8, 7), width: 100, unit: "week" }], 10)).toBeNull();
+  });
+});
+
+describe("centerDayScroll", () => {
+  const days = [7, 8, 9, 10].map((d) => ({ date: new Date(2026, 8, d), width: 38, unit: "day" }));
+  const end = new Date(2026, 8, 11);
+  it("puts the middle of the day in the middle of the chart", () => {
+    // Sep 9 is the third cell, its middle at 2.5 × 38 = 95: a 100px chart scrolls to 95 − 50.
+    expect(centerDayScroll(days, end, new Date(2026, 8, 9, 23, 30), 100)).toBe(45);
+    expect(centerDayScroll(days, end, new Date(2026, 8, 10, 0, 5), 40)).toBe(113);
+  });
+  it("can't scroll before the start of the scale", () => {
+    expect(centerDayScroll(days, end, new Date(2026, 8, 8), 400)).toBe(0);
+  });
+  it("finds the day inside a week or month cell", () => {
+    const weeks = [
+      { date: new Date(2026, 8, 7), width: 100, unit: "week" },
+      { date: new Date(2026, 8, 14), width: 100, unit: "week" },
+    ];
+    // Noon of Thursday Sep 17 is 3.5 days into the second week: 100 + 3.5/7 × 100 = 150.
+    expect(centerDayScroll(weeks, new Date(2026, 8, 21), new Date(2026, 8, 17), 100)).toBe(100);
+  });
+  it("returns null for a day that isn't on the scale", () => {
+    expect(centerDayScroll(days, end, new Date(2026, 8, 6), 100)).toBeNull();
+    expect(centerDayScroll(days, end, new Date(2026, 8, 11), 100)).toBeNull();
   });
 });
 

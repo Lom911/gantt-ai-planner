@@ -38,6 +38,7 @@ export function Toolbar({
   agentBusy,
   zoom,
   onZoom,
+  onToday,
   onImport,
   onAddTask,
   theme,
@@ -47,6 +48,7 @@ export function Toolbar({
   agentBusy: boolean;
   zoom: Zoom;
   onZoom(zoom: Zoom): void;
+  onToday(): void;
   onImport(): void;
   onAddTask(): void;
   theme: ThemeMode;
@@ -156,6 +158,15 @@ export function Toolbar({
           </button>
         ))}
       </div>
+      {/* Colored like the chart's today column, which it scrolls to the middle of the chart. */}
+      <button
+        type="button"
+        title="Показать сегодняшний день в середине диаграммы"
+        className="rounded-md border border-[var(--gantt-today-accent)] bg-[var(--gantt-today)] px-2.5 py-1 text-sm font-medium text-[var(--gantt-today-accent)] hover:bg-[var(--gantt-changed-bg)]"
+        onClick={onToday}
+      >
+        Сегодня
+      </button>
 
       <div className="ml-auto flex items-center gap-2">
         {meta?.llm_mode === "fake" && (
